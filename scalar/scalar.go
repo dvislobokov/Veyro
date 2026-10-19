@@ -11,9 +11,7 @@ package scalar
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json/v2"
 	"fmt"
 	"html"
@@ -30,25 +28,6 @@ const Version = "1.75.0"
 
 //go:embed scalar.js.gz
 var scriptGz []byte
-
-var (
-	etag      = func() string { sum := sha256.Sum256(scriptGz); return `"` + hex.EncodeToString(sum[:16]) + `"` }()
-	plainOnce sync.Once
-	plain     []byte
-	plainErr  error
-)
-
-func plainScript() ([]byte, error) {
-	plainOnce.Do(func() {
-		zr, err := gzip.NewReader(bytes.NewReader(scriptGz))
-		if err != nil {
-			plainErr = err
-			return
-		}
-		plain, plainErr = io.ReadAll(zr)
-	})
-	return plain, plainErr
-}
 
 // Options tune the reference page. The zero value is a sensible default.
 type Options struct {
@@ -103,43 +82,42 @@ func (o Options) UI(title, specURL, base string) http.Handler {
 	}
 	cfgJSON, _ := json.Marshal(cfg, json.Deterministic(true))
 	scriptURL := base + "/scalar.js"
-	page := []byte(fmt.Sprintf(pageHTML, html.EscapeString(title), html.EscapeString(string(cfgJSON)), scriptURL))
+	page := veyro.NewStatic("text/html; charset=utf-8", "no-cache",
+		[]byte(fmt.Sprintf(pageHTML, html.EscapeString(title), html.EscapeString(string(cfgJSON)), scriptURL)))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch strings.TrimPrefix(r.URL.Path, base) {
 		case "", "/":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache")
-			_, _ = w.Write(page)
+			page.ServeHTTP(w, r)
 		case "/scalar.js":
-			serveScript(w, r)
+			script().ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
 }
 
-func serveScript(w http.ResponseWriter, r *http.Request) {
-	h := w.Header()
-	h.Set("Content-Type", "text/javascript; charset=utf-8")
-	h.Set("Cache-Control", "public, max-age=31536000, immutable")
-	h.Set("ETag", etag)
-	h.Set("Vary", "Accept-Encoding")
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		h.Set("Content-Encoding", "gzip")
-		_, _ = w.Write(scriptGz)
-		return
-	}
-	b, err := plainScript()
-	if err != nil {
-		http.Error(w, "cannot decode embedded script", http.StatusInternalServerError)
-		return
-	}
-	_, _ = w.Write(b)
+var (
+	scriptOnce   sync.Once
+	scriptStatic *veyro.Static
+)
+
+// script decompresses the embedded bundle once and wraps it in a Static,
+// reusing the embedded gzip bytes for compressed responses.
+func script() *veyro.Static {
+	scriptOnce.Do(func() {
+		zr, err := gzip.NewReader(bytes.NewReader(scriptGz))
+		if err != nil {
+			panic("scalar: embedded bundle is corrupt: " + err.Error())
+		}
+		plain, err := io.ReadAll(zr)
+		if err != nil {
+			panic("scalar: embedded bundle is corrupt: " + err.Error())
+		}
+		scriptStatic = veyro.NewStaticGzip("text/javascript; charset=utf-8",
+			"public, max-age=31536000, immutable", plain, scriptGz)
+	})
+	return scriptStatic
 }
 
 // hideToolsCSS removes UI that only makes sense with scalar.com's hosted

@@ -189,18 +189,26 @@ func (a *App) ServeDocs(ui DocsUI) *App {
 	path := cfg.path
 	var (
 		once sync.Once
-		spec []byte
+		spec *Static
 		err  error
 	)
 	specURL := path + "/openapi.json"
 	a.Raw(http.MethodGet, specURL, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		once.Do(func() { spec, err = json.Marshal(a.OpenAPI(), json.Deterministic(true)) })
+		// Generated once, on the first request, so routes registered after
+		// ServeDocs are included; then served from memory with ETag/304 and
+		// a precompressed gzip body. "no-cache" means "revalidate", so a
+		// restarted server with new routes is picked up immediately.
+		once.Do(func() {
+			var body []byte
+			if body, err = json.Marshal(a.OpenAPI(), json.Deterministic(true)); err == nil {
+				spec = NewStatic("application/json; charset=utf-8", "no-cache", body)
+			}
+		})
 		if err != nil {
 			a.writeError(w, r, err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_, _ = w.Write(spec)
+		spec.ServeHTTP(w, r)
 	})).Hide()
 	if ui == nil {
 		return a
