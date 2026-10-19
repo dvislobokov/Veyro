@@ -1,11 +1,13 @@
 package veyro
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"reflect"
+	"sync"
 )
 
 // Handler is the shape of every veyro handler. *Context implements
@@ -46,15 +48,16 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) (http.Hand
 				app.writeError(w, r, err)
 				return
 			}
-			if errs == nil {
-				errs = ValidationErrors{}
-			}
-			validateValue(reflect.ValueOf(&in).Elem(), "", errs)
+			validateValue(reflect.ValueOf(&in).Elem(), "", &errs)
 			if v, ok := any(&in).(Validator); ok {
 				if err := v.Validate(c); err != nil {
 					var ve ValidationErrors
 					if errors.As(err, &ve) {
-						errs.merge(ve)
+						if errs == nil {
+							errs = ve
+						} else {
+							errs.merge(ve)
+						}
 					} else {
 						app.writeError(w, r, err)
 						return
@@ -88,8 +91,9 @@ func (a *App) render(c *Context, out any, outNone bool) {
 		w.WriteHeader(c.statusOr(http.StatusNoContent))
 		return
 	}
-	body, err := json.Marshal(out, a.cfg.jsonOpts...)
-	if err != nil {
+	buf := getBuffer()
+	defer putBuffer(buf)
+	if err := json.MarshalWrite(buf, out, a.cfg.jsonOpts...); err != nil {
 		a.writeError(w, r, err)
 		return
 	}
@@ -98,7 +102,21 @@ func (a *App) render(c *Context, out any, outNone bool) {
 		h.Set("Content-Type", "application/json; charset=utf-8")
 	}
 	w.WriteHeader(c.statusOr(http.StatusOK))
-	_, _ = w.Write(body)
+	_, _ = w.Write(buf.Bytes())
+}
+
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func getBuffer() *bytes.Buffer {
+	b := bufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func putBuffer(b *bytes.Buffer) {
+	if b.Cap() <= 64<<10 { // do not keep huge buffers alive
+		bufPool.Put(b)
+	}
 }
 
 // writeError maps an error to a problem response.
@@ -133,13 +151,14 @@ func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 	if q.TraceID == "" {
 		q.TraceID = TraceID(r.Context())
 	}
-	body, err := json.Marshal(&q, json.Deterministic(true))
-	if err != nil {
+	buf := getBuffer()
+	defer putBuffer(buf)
+	if err := json.MarshalWrite(buf, &q, json.Deterministic(true)); err != nil {
 		a.cfg.logger.ErrorContext(r.Context(), "veyro: cannot encode problem", "err", err)
 		http.Error(w, http.StatusText(q.Status), q.Status)
 		return
 	}
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.WriteHeader(q.Status)
-	_, _ = w.Write(body)
+	_, _ = w.Write(buf.Bytes())
 }

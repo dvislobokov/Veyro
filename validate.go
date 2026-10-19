@@ -191,8 +191,8 @@ func parseRules(tag, where string) []rule {
 }
 
 // validateValue validates v (a struct, or a container of structs) and records
-// errors in errs with keys prefixed by prefix.
-func validateValue(v reflect.Value, prefix string, errs ValidationErrors) {
+// errors in *errs (allocated on first error) with keys prefixed by prefix.
+func validateValue(v reflect.Value, prefix string, errs *ValidationErrors) {
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return
@@ -211,7 +211,7 @@ func validateValue(v reflect.Value, prefix string, errs ValidationErrors) {
 			ok := true
 			for _, r := range fr.rules {
 				if msg := applyRule(r, fv, key); msg != "" {
-					errs.Add(key, msg)
+					errs.add(key, msg)
 					ok = false
 				}
 			}

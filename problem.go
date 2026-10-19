@@ -116,6 +116,14 @@ func (e ValidationErrors) Add(field, message string) {
 	e[field] = append(e[field], message)
 }
 
+// add appends to a possibly nil map, allocating it on first use.
+func (e *ValidationErrors) add(field, message string) {
+	if *e == nil {
+		*e = ValidationErrors{}
+	}
+	(*e)[field] = append((*e)[field], message)
+}
+
 func (e ValidationErrors) merge(o ValidationErrors) {
 	for k, v := range o {
 		e[k] = append(e[k], v...)

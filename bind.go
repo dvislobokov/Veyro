@@ -189,12 +189,13 @@ func (b *binder) bind(r *http.Request, v reflect.Value) (ValidationErrors, error
 
 	var query map[string][]string
 	for _, f := range b.fields {
-		var vals []string
+		var (
+			single string // one value, no slice allocation
+			vals   []string
+		)
 		switch f.src {
 		case srcPath:
-			if s := r.PathValue(f.name); s != "" {
-				vals = []string{s}
-			}
+			single = PathValue(r, f.name)
 		case srcQuery:
 			if query == nil {
 				query = r.URL.Query()
@@ -204,17 +205,23 @@ func (b *binder) bind(r *http.Request, v reflect.Value) (ValidationErrors, error
 			vals = r.Header.Values(f.name)
 		case srcCookie:
 			if c, err := r.Cookie(f.name); err == nil {
-				vals = []string{c.Value}
+				single = c.Value
 			}
 		}
-		if len(vals) == 0 {
+		fv := v.FieldByIndex(f.index)
+		switch {
+		case single != "":
+			if err := setFromString(fv, single); err != nil {
+				add(f.name, fmt.Sprintf("The value '%s' is not valid.", single))
+			}
+		case len(vals) > 0:
+			if err := setFromStrings(fv, vals); err != nil {
+				add(f.name, fmt.Sprintf("The value '%s' is not valid.", strings.Join(vals, ",")))
+			}
+		default:
 			if f.def != nil {
-				v.FieldByIndex(f.index).Set(*f.def)
+				fv.Set(*f.def)
 			}
-			continue
-		}
-		if err := setFromStrings(v.FieldByIndex(f.index), vals); err != nil {
-			add(f.name, fmt.Sprintf("The value '%s' is not valid.", strings.Join(vals, ",")))
 		}
 	}
 	return errs, nil
@@ -232,7 +239,15 @@ func (b *binder) decodeBody(r *http.Request, v reflect.Value) error {
 				fmt.Sprintf("Content-Type %q is not supported; use application/json.", ct))
 		}
 	}
-	body := http.MaxBytesReader(nil, r.Body, b.cfg.maxBody)
+	var body io.Reader = r.Body
+	switch {
+	case r.ContentLength > b.cfg.maxBody:
+		return &http.MaxBytesError{Limit: b.cfg.maxBody}
+	case r.ContentLength < 0:
+		// Unknown length: cap it. With a known length the server already
+		// stops the body at Content-Length, so no wrapper is needed.
+		body = http.MaxBytesReader(nil, r.Body, b.cfg.maxBody)
+	}
 	err := json.UnmarshalRead(body, v.Addr().Interface(), b.cfg.jsonOpts...)
 	if errors.Is(err, io.EOF) {
 		return nil // empty body: leave the zero value, validation decides

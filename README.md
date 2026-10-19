@@ -290,6 +290,13 @@ Routes use `net/http.ServeMux` pattern syntax on Veyro's own radix router:
 over wildcards, wrong methods get `405` with `Allow`, and lookups allocate
 nothing. `App` itself is an `http.Handler`, so it drops into any server.
 
+## Performance
+
+On a typical JSON endpoint (bind path + body, validate, respond) Veyro is
+level with Echo and ahead of Gin while doing more per request; its router
+lookup is allocation-free and about three times faster than `ServeMux`.
+Numbers, methodology and caveats are in [bench/README.md](bench/README.md).
+
 ## Example
 
 ```sh

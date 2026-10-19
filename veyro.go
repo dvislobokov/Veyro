@@ -101,6 +101,30 @@ type reqInfo struct {
 	app     *App
 	traceID string
 	route   *Route
+	params  [maxParams]param
+	nparams int
+}
+
+// pathValue returns a bound wildcard, or "" when absent.
+func (i *reqInfo) pathValue(name string) (string, bool) {
+	for _, p := range i.params[:i.nparams] {
+		if p.name == name {
+			return p.value, true
+		}
+	}
+	return "", false
+}
+
+// PathValue returns the wildcard value bound for name on a request served
+// by an App. It is the allocation-free equivalent of r.PathValue, which
+// also works (values are copied there for Raw handlers).
+func PathValue(r *http.Request, name string) string {
+	if i := infoFrom(r.Context()); i != nil {
+		if v, ok := i.pathValue(name); ok {
+			return v
+		}
+	}
+	return r.PathValue(name)
 }
 
 type reqKey struct{}
@@ -404,7 +428,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.once.Do(func() { a.chain = wrap(http.HandlerFunc(a.serve), a.mw) })
 
 	id := a.cfg.requestID(r)
-	w.Header().Set("X-Request-Id", id)
+	if id != "" {
+		w.Header().Set("X-Request-Id", id)
+	}
 	ctx := &reqCtx{Context: r.Context(), info: reqInfo{app: a, traceID: id}}
 	r = r.WithContext(ctx)
 
@@ -427,8 +453,13 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request) {
 	res := a.tree.match(r.Method, r.URL.EscapedPath())
 	switch {
 	case res.route != nil:
-		for _, p := range res.params[:res.n] {
-			r.SetPathValue(p.name, p.value)
+		if info := infoFrom(r.Context()); info != nil {
+			info.params, info.nparams = res.params, res.n
+		}
+		if res.route.in == nil { // Raw handler: make r.PathValue work too
+			for _, p := range res.params[:res.n] {
+				r.SetPathValue(p.name, p.value)
+			}
 		}
 		res.route.ServeHTTP(w, r)
 	case res.redirect != "":

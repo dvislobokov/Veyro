@@ -28,10 +28,18 @@ type Context struct {
 }
 
 func newContext(app *App, w http.ResponseWriter, r *http.Request) *Context {
-	c := &Context{app: app, w: w}
-	c.Context = context.WithValue(r.Context(), ctxKey{}, c)
-	c.Request = r.WithContext(c.Context)
+	c := &Context{app: app, w: w, Context: r.Context()}
+	c.Request = r.WithContext(c)
 	return c
+}
+
+// Value makes the Context discoverable through ContextFrom from itself and
+// from any context derived from it, without an extra context layer.
+func (c *Context) Value(key any) any {
+	if key == (ctxKey{}) {
+		return c
+	}
+	return c.Context.Value(key)
 }
 
 // ContextFrom returns the *Context stored in ctx, or nil when ctx did not
@@ -91,7 +99,7 @@ func (c *Context) User() *User {
 func (c *Context) SetUser(u *User) { c.user = u }
 
 // Param returns a path parameter by name.
-func (c *Context) Param(name string) string { return c.Request.PathValue(name) }
+func (c *Context) Param(name string) string { return PathValue(c.Request, name) }
 
 // Query returns the first query value for key.
 func (c *Context) Query(key string) string { return c.Request.URL.Query().Get(key) }

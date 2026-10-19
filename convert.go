@@ -50,6 +50,14 @@ func setFromStrings(v reflect.Value, vals []string) error {
 	return setScalar(v, vals[0])
 }
 
+// setFromString sets v from a single raw value; slices get one element.
+func setFromString(v reflect.Value, raw string) error {
+	if v.Kind() == reflect.Slice && v.Type().Elem().Kind() != reflect.Uint8 {
+		return setFromStrings(v, []string{raw})
+	}
+	return setScalar(v, raw)
+}
+
 func setScalar(v reflect.Value, raw string) error {
 	if v.Kind() == reflect.Pointer {
 		p := reflect.New(v.Type().Elem())
