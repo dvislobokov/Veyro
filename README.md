@@ -292,6 +292,26 @@ func (CreateUser) Example() any {
 Pointers are nullable; fields are required when `validate:"required"` says
 so, and in output-only types every non-nullable field is required.
 
+## Probes
+
+```go
+app.Probes()                                   // GET /probe/liveness, GET /probe/healthy
+app.AddCheck("db", func(ctx context.Context) error { return db.PingContext(ctx) })
+app.AddCheck("cache", cache.Ping)
+```
+
+`/probe/liveness` answers `{"status":"ok"}` while the process can serve.
+`/probe/healthy` runs every check concurrently under a timeout and answers
+`200` or `503` with each check's result:
+
+```json
+{"status":"fail","checks":{"db":{"status":"fail","error":"connection refused","duration":"2.1ms"},
+                           "cache":{"status":"ok","duration":"310µs"}}}
+```
+
+Probes are public even when the App requires authorization, and hidden
+from the OpenAPI document.
+
 ## Logging
 
 Veyro logs through [srog](https://github.com/dvislobokov/srog), a

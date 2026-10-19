@@ -72,6 +72,7 @@ type App struct {
 	routes  []*Route
 	schemes []Authenticator
 	oapi    *OpenAPIConfig
+	probes  probes
 }
 
 // New creates an App.
@@ -198,6 +199,7 @@ type Router struct {
 	parent       *Router
 	prefix       string
 	mw           []Middleware
+	reqs         []Middleware // Require* middleware: always per route, so AllowAnonymous can skip it
 	requiresAuth bool
 	tags         []string
 }
@@ -221,7 +223,8 @@ func (g *Router) Use(mw ...Middleware) *Router {
 // policy for all routes in this router.
 func (g *Router) RequireAuthorization(policies ...Policy) *Router {
 	g.requiresAuth = true
-	return g.Use(Authorize(policies...))
+	g.reqs = append(g.reqs, Authorize(policies...))
+	return g
 }
 
 // RequireRole requires an authenticated user with one of the roles.
@@ -257,12 +260,15 @@ func (g *Router) inheritedTags() []string {
 }
 
 // collect returns the middleware of this router and its ancestors, outermost
-// first, excluding the root (applied in App.ServeHTTP).
+// first. The root's plain middleware is excluded (it wraps every request in
+// App.ServeHTTP, 404s included); its Require* middleware is included, since
+// authorization must run after routing for AllowAnonymous to work.
 func (g *Router) collect() []Middleware {
 	if g.isRoot() {
-		return nil
+		return append([]Middleware(nil), g.reqs...)
 	}
-	return append(g.parent.collect(), g.mw...)
+	out := append(g.parent.collect(), g.mw...)
+	return append(out, g.reqs...)
 }
 
 // Handle registers a typed handler. The pattern uses net/http.ServeMux syntax
