@@ -26,7 +26,7 @@ func createUser(c *veyro.Context, in CreateUser) (User, error) {
 app := veyro.New()
 app.UseAuthentication(veyro.Bearer(verifyToken))
 app.Post("/users", createUser).RequireRole("admin") // In and Out inferred
-app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"})
+app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
 app.Run(ctx, ":8080")
 ```
 
@@ -204,11 +204,18 @@ plug any scheme by implementing `Authenticator`.
 ## OpenAPI from your types
 
 ```go
-app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"})
+import "github.com/dvislobokov/veyro/scalar"
+
+app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
 ```
 
-That serves `/docs/openapi.json` (OpenAPI 3.1) and an interactive reference
-at `/docs`. Everything comes from the routes you already registered: `In`
+That serves `/docs/openapi.json` (OpenAPI 3.1) and an interactive
+[Scalar](https://github.com/scalar/scalar) reference at `/docs`. The UI is
+embedded in your binary and makes **no external requests**: no CDN, no web
+fonts, no request proxy, no telemetry. It works on an air-gapped network.
+Pass `nil` instead of `scalar.UI` to serve only the JSON, or implement
+`veyro.DocsUI` to plug in another viewer. Everything in the document comes
+from the routes you already registered: `In`
 types become parameters and request bodies, `Out` types become responses,
 `Require*` adds security and `401`/`403`, and errors are documented as
 problem details. Refine it with tags on fields and metadata on routes:

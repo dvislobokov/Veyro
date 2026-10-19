@@ -19,6 +19,7 @@ import (
 	"uuid"
 
 	"github.com/dvislobokov/veyro"
+	"github.com/dvislobokov/veyro/scalar"
 )
 
 // Role is a string enum: validated on input, documented in OpenAPI.
@@ -125,7 +126,7 @@ func main() {
 		Title:       "Users API",
 		Version:     "1.0.0",
 		Description: "Example service built with Veyro.",
-	})
+	}, scalar.UI)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

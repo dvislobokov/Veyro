@@ -173,7 +173,9 @@ type Problem struct {
 
 - ~~OpenAPI 3.1 из типов `In`/`Out` и правил `validate`.~~ Сделано: `openapi.go`,
   `app.OpenAPI()` / `app.ServeDocs()`, теги `doc`/`example`/`default`/`enum`/`format`/
-  `deprecated`, интерфейс `Enum`, страница Scalar.
+  `deprecated`, интерфейс `Enum`. UI — подпакет `scalar` со встроенным через `embed`
+  бандлом (gzip, ~1.3 МБ): никаких CDN, шрифтов, прокси и телеметрии. Ядро про UI не
+  знает, принимает `DocsUI`; `nil` — только JSON.
 - Form и multipart биндинг для тела.
 - SSE/стриминг через `iter.Seq` и `Renderer`.
 - Бенчмарки против ServeMux и chi, затем решение о собственном роутере.

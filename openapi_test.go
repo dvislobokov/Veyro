@@ -74,7 +74,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	})
 	acc.Get("/stats", func(c *veyro.Context, _ veyro.None) (Stats, error) { return Stats{}, nil })
 	app.Get("/hidden", func(c *veyro.Context, _ veyro.None) (string, error) { return "", nil }).Hide()
-	app.ServeDocs("/docs", veyro.Info{Title: "Accounts API", Version: "1.0.0"})
+	app.ServeDocs("/docs", veyro.Info{Title: "Accounts API", Version: "1.0.0"}, nil)
 
 	// Served document.
 	rec := httptest.NewRecorder()
@@ -88,8 +88,8 @@ func TestOpenAPIDocument(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `data-url="/docs/openapi.json"`) {
-		t.Errorf("docs page: %d", rec.Code)
+	if rec.Code != 404 {
+		t.Errorf("docs page without UI must be 404, got %d", rec.Code)
 	}
 
 	get := func(path string) any {

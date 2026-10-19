@@ -174,17 +174,27 @@ func (a *App) OpenAPI(info Info, servers ...Server) *Document {
 	return g.build(info, servers)
 }
 
-// ServeDocs serves the OpenAPI document at <path>/openapi.json and an
-// interactive API reference (Scalar) at <path>. The document is generated on
-// first request, so routes registered later are included.
-func (a *App) ServeDocs(path string, info Info, servers ...Server) *App {
+// DocsUI builds the handler for an interactive API reference. It receives
+// the document title, the URL of the OpenAPI JSON and the base path it is
+// mounted on, and must serve the page at base and any assets below it.
+// The scalar sub-package provides one that embeds Scalar with no external
+// requests.
+type DocsUI func(title, specURL, base string) http.Handler
+
+// ServeDocs serves the OpenAPI document at <path>/openapi.json and, when ui
+// is not nil, an interactive reference at <path>. The document is generated
+// on first request, so routes registered later are included.
+//
+//	app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
+func (a *App) ServeDocs(path string, info Info, ui DocsUI, servers ...Server) *App {
 	path = strings.TrimSuffix(path, "/")
 	var (
 		once sync.Once
 		spec []byte
 		err  error
 	)
-	a.Raw(http.MethodGet, path+"/openapi.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	specURL := path + "/openapi.json"
+	a.Raw(http.MethodGet, specURL, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		once.Do(func() { spec, err = json.Marshal(a.OpenAPI(info, servers...), json.Deterministic(true)) })
 		if err != nil {
 			a.writeError(w, r, err)
@@ -193,27 +203,14 @@ func (a *App) ServeDocs(path string, info Info, servers ...Server) *App {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = w.Write(spec)
 	})).Hide()
-	page := fmt.Sprintf(docsPage, info.Title, path+"/openapi.json")
-	a.Raw(http.MethodGet, path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(page))
-	})).Hide()
+	if ui == nil {
+		return a
+	}
+	h := ui(info.Title, specURL, path)
+	a.Raw(http.MethodGet, path, h).Hide()
+	a.Raw(http.MethodGet, path+"/{asset...}", h).Hide()
 	return a
 }
-
-const docsPage = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>%s</title>
-</head>
-<body>
-<script id="api-reference" data-url="%s"></script>
-<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.0"></script>
-</body>
-</html>
-`
 
 const (
 	usedIn  = 1
