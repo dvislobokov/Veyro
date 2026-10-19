@@ -265,7 +265,15 @@ app.Get("/internal", probe).Hide()
 | `validate:"..."` | `required`, `min`/`max`, `minlen`/`maxlen`, `oneof`, `email` become schema keywords |
 
 Types implementing `EnumValues() []string` are string enums everywhere they
-appear, including inside slices. `uuid.UUID`, `time.Time`, `time.Duration`,
+appear, including inside slices. Types implementing `Example() any` get a
+whole-object example on their schema, on request bodies and on responses,
+which the reference UI uses as the ready-made "Try it" payload:
+
+```go
+func (CreateUser) Example() any {
+    return CreateUser{Name: "Ann", Email: "ann@example.com", Age: 30}
+}
+``` `uuid.UUID`, `time.Time`, `time.Duration`,
 `[]byte` and any `encoding.TextMarshaler` get the right string format.
 Pointers are nullable; fields are required when `validate:"required"` says
 so, and in output-only types every non-nullable field is required.

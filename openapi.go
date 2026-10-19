@@ -29,7 +29,9 @@ import (
 //	deprecated:"true"  marks the field deprecated
 //	validate:"..."     required, min/max, minlen/maxlen, oneof, email map to schema keywords
 //
-// Types implementing Enum are documented as string enums.
+// Types implementing Enum are documented as string enums. Types implementing
+// Exampler contribute a whole-object example to their schema and to the
+// request bodies and responses that use them.
 
 // Info is the OpenAPI info object.
 type Info struct {
@@ -152,6 +154,40 @@ type Schema struct {
 	MinItems             *int               `json:"minItems,omitzero"`
 	MaxItems             *int               `json:"maxItems,omitzero"`
 	Deprecated           bool               `json:"deprecated,omitzero"`
+}
+
+// Exampler is implemented by types that can produce a representative value
+// for documentation. The value is encoded as JSON and used as the example
+// of the type's schema, of request bodies of that type and of responses.
+//
+//	func (CreateUser) Example() any {
+//	    return CreateUser{Name: "Ann", Email: "ann@example.com", Age: 30}
+//	}
+type Exampler interface {
+	Example() any
+}
+
+var examplerType = reflect.TypeFor[Exampler]()
+
+// typeExample returns the JSON form of t's example, or nil.
+func typeExample(t reflect.Type) any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	var v reflect.Value
+	switch {
+	case t.Implements(examplerType):
+		v = reflect.Zero(t)
+	case reflect.PointerTo(t).Implements(examplerType):
+		v = reflect.New(t)
+	default:
+		return nil
+	}
+	ex := v.Interface().(Exampler).Example()
+	if ex == nil {
+		return nil
+	}
+	return jsonRoundTrip(ex)
 }
 
 // SecuritySchemer is implemented by authenticators that can describe
@@ -355,7 +391,7 @@ func (g *generator) operation(rt *Route, path, method string) *Operation {
 			}
 			op.RequestBody = &RequestBody{
 				Required: required,
-				Content:  map[string]*MediaType{"application/json": {Schema: body}},
+				Content:  map[string]*MediaType{"application/json": {Schema: body, Example: typeExample(rt.in)}},
 			}
 		}
 		op.Responses["400"] = g.problemResponse(http.StatusBadRequest)
@@ -371,7 +407,7 @@ func (g *generator) operation(rt *Route, path, method string) *Operation {
 	}
 	resp := &Response{Description: http.StatusText(status)}
 	if rt.out != noneType && status != http.StatusNoContent {
-		resp.Content = map[string]*MediaType{"application/json": {Schema: g.schemaFor(rt.out)}}
+		resp.Content = map[string]*MediaType{"application/json": {Schema: g.schemaFor(rt.out), Example: typeExample(rt.out)}}
 	}
 	op.Responses[strconv.Itoa(status)] = resp
 
@@ -489,7 +525,9 @@ func (g *generator) component(t reflect.Type) string {
 	}
 	g.names[t], g.taken[name] = name, t
 	g.schemas[name] = nil // reserve: handles recursive types
-	g.schemas[name] = g.structSchema(t, nil)
+	sch := g.structSchema(t, nil)
+	sch.Example = typeExample(t)
+	g.schemas[name] = sch
 	return name
 }
 

@@ -44,6 +44,10 @@ type Stats struct {
 	Perhaps []int   `json:"perhaps"`
 }
 
+func (Account) Example() any {
+	return Account{Name: "Ann", Role: "admin", Status: "active", Tags: []string{"vip"}}
+}
+
 type ListAccounts struct {
 	Page    int    `query:"page" default:"1" validate:"min=1" doc:"Page number" example:"2"`
 	PerPage int    `query:"per_page" default:"20" validate:"max=100"`
@@ -200,6 +204,21 @@ func TestOpenAPIDocument(t *testing.T) {
 	del := get("paths./accounts/{id}.delete.responses").(map[string]any)
 	if del["204"] == nil || del["200"] != nil {
 		t.Errorf("delete responses: %v", keys(del))
+	}
+
+	// Exampler: whole-object example on the component, the request body and the response.
+	for _, path := range []string{
+		"components.schemas.Account.example",
+		"paths./accounts.post.requestBody.content.application/json.example",
+		"paths./accounts.post.responses.201.content.application/json.example",
+	} {
+		ex, _ := get(path).(map[string]any)
+		if ex["name"] != "Ann" || ex["role"] != "admin" || !containsAny(ex["tags"], "vip") || ex["id"] != "00000000-0000-0000-0000-000000000000" {
+			t.Errorf("%s: %v", path, ex)
+		}
+	}
+	if _, has := get("components.schemas.Profile").(map[string]any)["example"]; has {
+		t.Error("types without Example() must not get one")
 	}
 
 	// Components: Account schema with tag-driven keywords.
