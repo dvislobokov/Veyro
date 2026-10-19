@@ -1,56 +1,121 @@
+<div align="center">
+
 # Veyro
 
-A small HTTP framework for Go 1.27+. Handlers are plain typed functions;
-request binding, validation, JSON and error responses are handled for you.
+**Typed HTTP handlers for Go 1.27. No boilerplate, no magic context, no codegen.**
+
+[![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/doc/go1.27)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dvislobokov/veyro.svg)](https://pkg.go.dev/github.com/dvislobokov/veyro)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Zero dependencies](https://img.shields.io/badge/dependencies-0-success)](go.mod)
+
+</div>
 
 ```go
 type CreateUser struct {
-    Name  string `json:"name"  validate:"required,minlen=2"`
+    Name  string `json:"name"  validate:"required,minlen=2,maxlen=64"`
     Email string `json:"email" validate:"required,email"`
 }
 
-type GetUser struct {
-    ID     uuid.UUID `path:"id"`
-    Expand []string  `query:"expand"`
+func createUser(ctx context.Context, in CreateUser) (User, error) {
+    u := User{ID: uuid.NewV7(), Name: in.Name, Email: in.Email}
+    veyro.Created(ctx, "/users/"+u.ID.String())
+    return u, nil
 }
 
-func create(ctx context.Context, in CreateUser) (User, error) { ... }
-func get(ctx context.Context, in GetUser) (User, error)       { ... }
-
 app := veyro.New()
-app.Post("/users", create)     // In and Out are inferred from the handler
-app.Get("/users/{id}", get)
+app.Post("/users", createUser) // In and Out inferred from the handler
 app.Run(ctx, ":8080")
 ```
 
-Veyro relies on Go 1.27 **generic methods**: `app.Post` has its own type
-parameters, so no `Register[In, Out](app, ...)` helpers are needed.
+That's a complete endpoint: JSON decoding, validation, status code, error
+handling and a problem-details response for anything that goes wrong.
 
-## Request binding
+---
 
-One struct describes the whole request. Fields tagged `path`, `query`,
-`header` or `cookie` come from those sources; every other exported field is
-decoded from the JSON body (encoding/json/v2). Use `veyro.None` when there is
-no input.
+## Why Veyro
 
-Supported field types for non-body sources: strings, bools, ints, uints,
-floats, `time.Duration`, anything implementing `encoding.TextUnmarshaler`
-(`uuid.UUID`, `time.Time`, `netip.Addr`, ...), pointers to those, and slices
-for repeated query/header values. A `path` tag whose name is missing from the
-route pattern panics at registration.
+Go 1.27 added [**generic methods**](https://go.dev/doc/go1.27). Veyro is the
+first framework built on them: `app.Post` carries its own type parameters, so a
+handler is just a function from input to output. No `Register[In, Out](...)`
+helpers, no `c.Bind(&req)`, no `func(w, r)`.
+
+| | Veyro | Gin / Echo / Fiber | Huma | net/http |
+|---|:---:|:---:|:---:|:---:|
+| Typed input and output | ✅ | ❌ | ✅ | ❌ |
+| Fluent `app.Post(path, fn)` | ✅ | ✅ | ❌ | ✅ |
+| Plain `context.Context` in handlers | ✅ | ❌ | ✅ | ✅ |
+| Path, query, headers and body in one struct | ✅ | ❌ | partially | ❌ |
+| Problem details (RFC 9457) everywhere | ✅ | ❌ | ✅ | ❌ |
+| Works with any `net/http` middleware | ✅ | ❌ | ✅ | ✅ |
+| Dependencies | 0 | many | some | 0 |
+
+## Install
+
+```sh
+go get github.com/dvislobokov/veyro
+```
+
+Requires Go 1.27 or newer.
+
+## One struct per request
+
+Describe the whole request in a single type. Tagged fields come from the URL,
+headers or cookies; everything else is the JSON body.
+
+```go
+type UpdateUser struct {
+    ID      uuid.UUID `path:"id"`
+    Expand  []string  `query:"expand"`
+    IfMatch string    `header:"If-Match"`
+    Session string    `cookie:"sid"`
+
+    Name  string  `json:"name"  validate:"required,minlen=2"`
+    Age   *int    `json:"age"   validate:"min=18"`
+    Role  string  `json:"role"  validate:"oneof=admin user"`
+}
+
+app.Put("/users/{id}", func(ctx context.Context, in UpdateUser) (User, error) { ... })
+```
+
+Supported for `path`, `query`, `header` and `cookie`: strings, bools, ints,
+uints, floats, `time.Duration`, any `encoding.TextUnmarshaler` (`uuid.UUID`,
+`time.Time`, `netip.Addr`, ...), pointers, and slices for repeated values.
+A `path` tag with no matching `{name}` in the pattern panics at startup,
+not in production.
+
+Use `veyro.None` for handlers without input; return `veyro.None` for
+`204 No Content`.
 
 ## Validation
 
-Rules live in the `validate` tag: `required`, `min=`, `max=`, `minlen=`,
-`maxlen=`, `oneof=a b c`, `email`. Zero values are "not provided": only
-`required` complains about them, so use a pointer when zero must be checked.
-Nested structs and slices are validated recursively. For cross-field logic
-implement `Validate(ctx) error` and return `veyro.ValidationErrors`.
+Rules live in the `validate` tag and run before your handler is called.
 
-## Errors
+| Rule | Meaning |
+|---|---|
+| `required` | not the zero value |
+| `min=N`, `max=N` | numeric bounds |
+| `minlen=N`, `maxlen=N` | length of a string, slice or map |
+| `oneof=a b c` | one of the listed values |
+| `email` | looks like an e-mail address |
 
-Every error response is RFC 9457 `application/problem+json`, in the shape
-ASP.NET Core produces:
+A zero value means "not provided", so only `required` complains about it;
+use a pointer when zero itself must be checked. Nested structs, slices and
+maps are validated recursively. For cross-field rules implement `Validator`:
+
+```go
+func (s *Signup) Validate(ctx context.Context) error {
+    if s.Password != s.Confirm {
+        return veyro.Invalid("confirm", "Passwords do not match.")
+    }
+    return nil
+}
+```
+
+## Errors are problem details
+
+Every error response is `application/problem+json` (RFC 9457), in exactly the
+shape ASP.NET Core clients already understand:
 
 ```json
 {
@@ -58,35 +123,72 @@ ASP.NET Core produces:
   "title": "One or more validation errors occurred.",
   "status": 400,
   "errors": {
-    "name": ["The name field is required."],
-    "age": ["The field age must be greater than or equal to 18."],
-    "$": ["The request body is not valid JSON: ..."]
+    "id":           ["The value 'abc' is not valid."],
+    "name":         ["The field name must be a string or array type with a minimum length of '2'."],
+    "address.city": ["The address.city field is required."],
+    "$":            ["The request body is not valid JSON: unexpected EOF."]
   },
   "traceId": "01994c0e-6b7a-7c4e-9d2b-1f3a5e0c8b2d"
 }
 ```
 
-Handlers return `*veyro.Problem` (`veyro.NotFound(...)`, `veyro.Conflict(...)`,
-`veyro.NewProblem(status, detail)`) for specific statuses; any other error is a
-500 without detail (enable `veyro.ExposeErrors(true)` in development). Unknown
-routes and wrong methods also answer with problems.
+Return a problem from a handler to pick the status:
 
-## Responses
+```go
+return User{}, veyro.NotFound("user does not exist").With("userId", id)
+```
 
-The handler result is encoded as JSON with status 200. `veyro.None` yields 204.
-`veyro.SetStatus`, `veyro.Created`, `veyro.Header` and `veyro.SetCookie` adjust
-the response from inside a handler. A result type implementing `Renderer`
-writes the response itself (redirects, files, streams).
+Any other error becomes a `500` with no detail leaked (turn on
+`veyro.ExposeErrors(true)` in development). Unknown routes, wrong methods,
+unsupported media types, oversized bodies and panics all answer with problems
+too, and every response carries an `X-Request-Id`.
 
-## Middleware
+## Shaping the response
 
-`func(http.Handler) http.Handler`, so chi, gorilla and otelhttp middleware
-work unchanged. `app.Use` wraps every request including 404s; `group.Use`
-applies to routes registered on that group afterwards.
+```go
+veyro.SetStatus(ctx, http.StatusAccepted)
+veyro.Header(ctx).Set("Cache-Control", "no-store")
+veyro.SetCookie(ctx, &http.Cookie{Name: "sid", Value: sid})
+veyro.Created(ctx, "/orders/42")
+```
 
-## Notes
+Need full control? Return a type that implements `Renderer` and write the
+response yourself: redirects, files, server-sent events, HTML.
 
-- Routing is `net/http.ServeMux` (Go 1.22 patterns), so `{id}`, `{path...}`
-  and `{$}` work as documented there.
-- `encoding/json/v2` has no default encoding for `time.Duration`; tag such
-  fields with a `format` option or exclude them with `json:"-"`.
+## Groups and middleware
+
+Middleware is plain `func(http.Handler) http.Handler`, so chi, gorilla and
+otelhttp middleware work unchanged.
+
+```go
+app := veyro.New(veyro.WithLogger(logger))
+app.Use(veyro.Logger(logger))          // every request, 404s included
+
+api := app.Group("/api/v1", auth)
+api.Get("/me", me)
+api.Raw("GET", "/metrics", promhttp.Handler())
+```
+
+Routes use `net/http.ServeMux` patterns: `/users/{id}`, `/files/{path...}`,
+`/{$}`. `App` itself is an `http.Handler`, so it drops into any server.
+
+## Example
+
+```sh
+go run ./examples/basic
+curl -X POST localhost:8080/users -H 'Content-Type: application/json' \
+     -d '{"name":"Ann","email":"ann@example.com","age":30}'
+```
+
+## Roadmap
+
+- [ ] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
+- [ ] Form and multipart request bodies
+- [ ] Server-sent events over `iter.Seq`
+- [ ] Benchmarks, then a custom radix router behind the same API
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the design notes and decisions.
+
+## License
+
+[MIT](LICENSE)
