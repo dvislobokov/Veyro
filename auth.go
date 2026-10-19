@@ -268,6 +268,9 @@ func Authentication(auths ...Authenticator) Middleware {
 				}
 				if u != nil {
 					ctx = context.WithValue(ctx, userKey{}, u)
+					if i := infoFrom(ctx); i != nil {
+						i.user = u
+					}
 					break
 				}
 			}
@@ -277,10 +280,17 @@ func Authentication(auths ...Authenticator) Middleware {
 }
 
 // UserFrom returns the user stored by Authentication, or nil. Inside handlers
-// prefer Context.User, which never returns nil.
+// prefer Context.User, which never returns nil. Middleware running before
+// Authentication (tracing, logging) still sees the user after the request
+// was handled, because it is also recorded on the request.
 func UserFrom(ctx context.Context) *User {
-	u, _ := ctx.Value(userKey{}).(*User)
-	return u
+	if u, _ := ctx.Value(userKey{}).(*User); u != nil {
+		return u
+	}
+	if i := infoFrom(ctx); i != nil {
+		return i.user
+	}
+	return nil
 }
 
 // --- authorization ---

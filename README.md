@@ -292,6 +292,43 @@ func (CreateUser) Example() any {
 Pointers are nullable; fields are required when `validate:"required"` says
 so, and in output-only types every non-nullable field is required.
 
+## Observability with OpenTelemetry
+
+The `telemetry` package instruments the App with the OpenTelemetry HTTP
+semantic conventions and sets up the SDK:
+
+```go
+import "github.com/dvislobokov/veyro/telemetry"
+
+shutdown, err := telemetry.Setup(ctx, telemetry.Config{
+    ServiceName: "users", ServiceVersion: "1.4.0", Environment: "prod",
+    Endpoint: "otel-collector:4317", Insecure: true,   // OTLP for traces, metrics (and logs with Logs: true)
+    Prometheus: true,                                  // and/or scrape
+})
+defer shutdown(ctx)
+
+app.Use(telemetry.Tracing(), telemetry.Metrics())
+app.Raw("GET", "/metrics", telemetry.PrometheusHandler()).Hide()
+```
+
+- **Traces**: one server span per request named by the route pattern
+  (`GET /users/{id}`), continued from incoming `traceparent`/`baggage`,
+  with method, route, status, sizes, client address, user agent, the Veyro
+  request id and `enduser.id` for authenticated users; `5xx` marks the span
+  as an error. `telemetry.StartSpan(c, "repo.GetUser")` adds children, and
+  because `*veyro.Context` is a `context.Context`, instrumented clients
+  (otelhttp, otelpgx, ...) continue the trace on their own.
+- **Metrics**: `http.server.request.duration`, `http.server.active_requests`,
+  `http.server.request.body.size` and `http.server.response.body.size`
+  attributed by method, route, status and scheme. Grafana's HTTP dashboards
+  read these as-is.
+- **Logs**: `Setup` installs `srogotel`, so every srog line written with a
+  request context carries `trace_id` and `span_id`; with `Logs: true` logs
+  ship to the collector over OTLP too.
+
+Only the `telemetry` package depends on the OpenTelemetry SDK; the core does
+not link it.
+
 ## Probes
 
 ```go
@@ -384,6 +421,7 @@ curl localhost:8080/me                 # 401 problem with WWW-Authenticate: Bear
 ## Roadmap
 
 - [x] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
+- [x] OpenTelemetry traces and metrics, health probes
 - [ ] Form and multipart request bodies
 - [ ] Server-sent events over `iter.Seq`
 - [x] Custom radix router with `ServeMux` pattern syntax

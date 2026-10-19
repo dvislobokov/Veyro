@@ -183,6 +183,16 @@ type Problem struct {
 4. `default` из тега применяется и при биндинге: для параметров — когда источник пуст,
    для тела — до декодирования JSON, чтобы отсутствующие поля получили значение.
 
+### Наблюдаемость
+
+Подпакет `telemetry` на OpenTelemetry: `Tracing()` даёт серверный span на запрос с
+именем по шаблону маршрута и атрибутами HTTP semconv, продолжает трейс из
+`traceparent`; `Metrics()` пишет стабильные метрики `http.server.*`; `Setup()`
+поднимает SDK с OTLP (gRPC/HTTP) и/или Prometheus и ставит `srogotel`, чтобы логи
+несли `trace_id`/`span_id`. Пробы в ядре: `AddCheck`, `/probe/liveness`,
+`/probe/healthy`. Версии OTel пришпилены к набору, совместимому с `srogotel`
+(`otel` v1.44, `otel/log` v0.20): `otel/log` v1.47 ломает его API.
+
 ## Следующие шаги
 
 - ~~OpenAPI 3.1 из типов `In`/`Out` и правил `validate`.~~ Сделано: `openapi.go`,

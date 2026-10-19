@@ -131,6 +131,7 @@ type reqInfo struct {
 	app     *App
 	traceID string
 	route   *Route
+	user    *User // set by Authentication so upstream middleware can see it
 	params  [maxParams]param
 	nparams int
 }

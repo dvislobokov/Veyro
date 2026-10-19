@@ -6,14 +6,18 @@
 //	curl -X POST localhost:8080/users -H 'Authorization: Bearer ann' -H 'Content-Type: application/json' -d '{"name":"A"}'   # validation problem
 //	curl localhost:8080/me                                  # 401 with WWW-Authenticate: Bearer
 //	open http://localhost:8080/docs                         # API reference (admin token required)
+//	curl localhost:8080/probe/healthy                       # health checks
+//	curl localhost:8080/metrics                             # Prometheus metrics
 //	curl -X DELETE localhost:8080/users/<id> -H 'Authorization: Bearer ann'   # 403
 package main
 
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 	"uuid"
@@ -22,6 +26,7 @@ import (
 	"github.com/dvislobokov/veyro"
 	"github.com/dvislobokov/veyro/middleware"
 	"github.com/dvislobokov/veyro/scalar"
+	"github.com/dvislobokov/veyro/telemetry"
 )
 
 // Role is a string enum: validated on input, documented in OpenAPI.
@@ -113,19 +118,35 @@ func main() {
 	log := srog.NewDevelopment()
 	defer log.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	// Traces and metrics stay in-process here; set Endpoint to ship them
+	// to an OpenTelemetry Collector.
+	shutdown, err := telemetry.Setup(ctx, telemetry.Config{ServiceName: "users-example", Prometheus: true})
+	if err != nil {
+		log.Fatal(err, "Telemetry setup failed")
+	}
+	defer shutdown(context.Background())
+
 	app := veyro.New(veyro.WithLogger(log))
+	probe := func(r *http.Request) bool {
+		return strings.HasPrefix(r.URL.Path, "/probe/") || r.URL.Path == "/metrics"
+	}
 	app.Use(
 		middleware.SecureHeaders(middleware.SecureHeadersOptions{}),
-		middleware.Logger(middleware.SkipPaths("/health")),
+		telemetry.Tracing(telemetry.SkipTracing(probe)),
+		telemetry.Metrics(telemetry.SkipMetrics(probe)),
+		middleware.Logger(middleware.Skip(probe)),
 		middleware.CORS(middleware.CORSAllowAll()),
 		middleware.Gzip(middleware.GzipOptions{}),
 		middleware.RateLimit(middleware.RateLimitOptions{Rate: 50, Burst: 100}),
 		middleware.Timeout(10*time.Second),
 	)
 	app.UseAuthentication(veyro.Bearer(lookupToken))
-	app.Get("/health", func(c *veyro.Context, _ veyro.None) (map[string]string, error) {
-		return map[string]string{"status": "ok"}, nil
-	}).Hide()
+	app.Probes()
+	app.AddCheck("store", func(ctx context.Context) error { return nil })
+	app.Raw("GET", "/metrics", telemetry.PrometheusHandler()).Hide()
 
 	users := app.Group("/users").Tags("users").RequireAuthorization()
 	users.Post("", db.create).Summary("Create a user").Success(201)
@@ -145,8 +166,6 @@ func main() {
 		return c.User(), nil
 	}).Tags("auth").Summary("Current user").RequireAuthorization()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	log.Information("Listening on {Addr}", ":8080")
 	if err := app.Run(ctx, ":8080"); err != nil {
 		log.Error(err, "Server stopped")
