@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 	"uuid"
@@ -59,10 +60,12 @@ func WithRequestID(fn func(*http.Request) string) Option {
 // App is the root router. It implements http.Handler.
 type App struct {
 	Router
-	mux   *http.ServeMux
-	cfg   config
-	once  sync.Once
-	chain http.Handler
+	mux     *http.ServeMux
+	cfg     config
+	once    sync.Once
+	chain   http.Handler
+	routes  []*Route
+	schemes []Authenticator
 }
 
 // New creates an App.
@@ -96,13 +99,23 @@ func appFrom(ctx context.Context) *App {
 	return a
 }
 
+// UseAuthentication installs Authentication(auths...) as app middleware and
+// records the schemes so the OpenAPI document can describe them.
+func (a *App) UseAuthentication(auths ...Authenticator) *App {
+	a.schemes = append(a.schemes, auths...)
+	a.Use(Authentication(auths...))
+	return a
+}
+
 // Router is a set of routes sharing a path prefix, middleware and
 // authorization requirements. App embeds the root Router.
 type Router struct {
-	app    *App
-	parent *Router
-	prefix string
-	mw     []Middleware
+	app          *App
+	parent       *Router
+	prefix       string
+	mw           []Middleware
+	requiresAuth bool
+	tags         []string
 }
 
 func (g *Router) isRoot() bool { return g == &g.app.Router }
@@ -123,17 +136,40 @@ func (g *Router) Use(mw ...Middleware) *Router {
 // RequireAuthorization requires an authenticated user that satisfies every
 // policy for all routes in this router.
 func (g *Router) RequireAuthorization(policies ...Policy) *Router {
+	g.requiresAuth = true
 	return g.Use(Authorize(policies...))
 }
 
 // RequireRole requires an authenticated user with one of the roles.
 func (g *Router) RequireRole(roles ...string) *Router {
-	return g.Use(Authorize(InRole(roles...)))
+	return g.RequireAuthorization(InRole(roles...))
 }
 
 // RequireClaim requires an authenticated user with the claim.
 func (g *Router) RequireClaim(typ string, values ...string) *Router {
-	return g.Use(Authorize(HasClaim(typ, values...)))
+	return g.RequireAuthorization(HasClaim(typ, values...))
+}
+
+// Tags sets the OpenAPI tags for every route in this router.
+func (g *Router) Tags(tags ...string) *Router {
+	g.tags = append(g.tags, tags...)
+	return g
+}
+
+func (g *Router) inheritsAuth() bool {
+	for r := g; r != nil; r = r.parent {
+		if r.requiresAuth {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Router) inheritedTags() []string {
+	if g.isRoot() {
+		return g.tags
+	}
+	return append(g.parent.inheritedTags(), g.tags...)
 }
 
 // collect returns the middleware of this router and its ancestors, outermost
@@ -153,7 +189,10 @@ func (g *Router) collect() []Middleware {
 // Use None for handlers without input; returning None yields 204 No Content.
 func (g *Router) Handle[In, Out any](method, pattern string, h Handler[In, Out]) *Route {
 	full := g.prefix + pattern
-	return g.route(method, full, adapt(g.app, full, h))
+	hh, b := adapt(g.app, full, h)
+	rt := g.route(method, full, hh)
+	rt.in, rt.out, rt.binder = reflect.TypeFor[In](), reflect.TypeFor[Out](), b
+	return rt
 }
 
 // Get registers a GET route.
@@ -192,6 +231,7 @@ func (g *Router) route(method, full string, h http.Handler) *Route {
 		full = method + " " + full
 	}
 	g.app.mux.Handle(full, rt)
+	g.app.routes = append(g.app.routes, rt)
 	return rt
 }
 
@@ -203,13 +243,27 @@ type Route struct {
 	Method  string
 	Pattern string
 
-	router    *Router
-	handler   http.Handler
-	mw        []Middleware
-	anonymous bool
+	router       *Router
+	handler      http.Handler
+	mw           []Middleware
+	anonymous    bool
+	requiresAuth bool
+
+	// OpenAPI metadata.
+	in, out reflect.Type
+	binder  *binder
+	meta    routeMeta
 
 	once  sync.Once
 	chain http.Handler
+}
+
+type routeMeta struct {
+	summary, description, operationID string
+	tags                              []string
+	success                           int
+	errors                            []int
+	deprecated, hidden                bool
 }
 
 type routeKey struct{}
@@ -228,17 +282,51 @@ func (rt *Route) Use(mw ...Middleware) *Route {
 
 // RequireAuthorization requires an authenticated user satisfying every policy.
 func (rt *Route) RequireAuthorization(policies ...Policy) *Route {
+	rt.requiresAuth = true
 	return rt.Use(Authorize(policies...))
 }
 
 // RequireRole requires an authenticated user with one of the roles.
 func (rt *Route) RequireRole(roles ...string) *Route {
-	return rt.Use(Authorize(InRole(roles...)))
+	return rt.RequireAuthorization(InRole(roles...))
 }
 
 // RequireClaim requires an authenticated user with the claim.
 func (rt *Route) RequireClaim(typ string, values ...string) *Route {
-	return rt.Use(Authorize(HasClaim(typ, values...)))
+	return rt.RequireAuthorization(HasClaim(typ, values...))
+}
+
+// Summary sets the OpenAPI summary.
+func (rt *Route) Summary(s string) *Route { rt.meta.summary = s; return rt }
+
+// Description sets the OpenAPI description.
+func (rt *Route) Description(s string) *Route { rt.meta.description = s; return rt }
+
+// OperationID sets the OpenAPI operationId (default: derived from method and path).
+func (rt *Route) OperationID(id string) *Route { rt.meta.operationID = id; return rt }
+
+// Tags adds OpenAPI tags.
+func (rt *Route) Tags(tags ...string) *Route { rt.meta.tags = append(rt.meta.tags, tags...); return rt }
+
+// Success declares the success status code documented for this route
+// (default 200, or 204 when Out is None). It does not change behaviour;
+// use c.Status or c.Created in the handler for that.
+func (rt *Route) Success(status int) *Route { rt.meta.success = status; return rt }
+
+// Errors documents additional problem responses, e.g. Errors(404, 409).
+func (rt *Route) Errors(statuses ...int) *Route {
+	rt.meta.errors = append(rt.meta.errors, statuses...)
+	return rt
+}
+
+// Deprecated marks the operation deprecated in the spec.
+func (rt *Route) Deprecated() *Route { rt.meta.deprecated = true; return rt }
+
+// Hide excludes the route from the OpenAPI document.
+func (rt *Route) Hide() *Route { rt.meta.hidden = true; return rt }
+
+func (rt *Route) secured() bool {
+	return !rt.anonymous && (rt.requiresAuth || rt.router.inheritsAuth())
 }
 
 // AllowAnonymous exempts this route from Authorize requirements inherited

@@ -24,14 +24,15 @@ func createUser(c *veyro.Context, in CreateUser) (User, error) {
 }
 
 app := veyro.New()
-app.Use(veyro.Authentication(veyro.Bearer(verifyToken)))
+app.UseAuthentication(veyro.Bearer(verifyToken))
 app.Post("/users", createUser).RequireRole("admin") // In and Out inferred
+app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"})
 app.Run(ctx, ":8080")
 ```
 
 That's a complete endpoint: authentication, authorization, JSON decoding,
-validation, status code, and a problem-details response for anything that
-goes wrong.
+validation, status code, a problem-details response for anything that goes
+wrong, and an OpenAPI 3.1 document with an interactive reference at `/docs`.
 
 ---
 
@@ -49,6 +50,7 @@ response controls live on `*veyro.Context`, which is itself a `context.Context`.
 | Fluent `app.Post(path, fn)` | ✅ | ✅ | ❌ | ✅ |
 | Handler context usable as `context.Context` | ✅ | ❌ | ✅ | ✅ |
 | Built-in `User`, authentication, `RequireRole` | ✅ | ❌ | ❌ | ❌ |
+| OpenAPI 3.1 from types, no annotations or codegen | ✅ | ❌ | ✅ | ❌ |
 | Path, query, headers and body in one struct | ✅ | ❌ | partially | ❌ |
 | Problem details (RFC 9457) everywhere | ✅ | ❌ | ✅ | ❌ |
 | Works with any `net/http` middleware | ✅ | ❌ | ✅ | ✅ |
@@ -184,7 +186,7 @@ func verifyToken(ctx context.Context, token string) (*veyro.User, error) {
         AddClaim(veyro.ClaimRole, "admin"), nil
 }
 
-app.Use(veyro.Authentication(veyro.Bearer(verifyToken)))
+app.UseAuthentication(veyro.Bearer(verifyToken))
 
 app.Get("/me", me).RequireAuthorization()
 app.Get("/admin", dashboard).RequireRole("admin", "owner")
@@ -198,6 +200,50 @@ Requests without credentials run as anonymous until a requirement is hit:
 then they get a `401` problem with `WWW-Authenticate`; authenticated users
 failing a policy get `403`. Write your own `Policy` for anything else, and
 plug any scheme by implementing `Authenticator`.
+
+## OpenAPI from your types
+
+```go
+app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"})
+```
+
+That serves `/docs/openapi.json` (OpenAPI 3.1) and an interactive reference
+at `/docs`. Everything comes from the routes you already registered: `In`
+types become parameters and request bodies, `Out` types become responses,
+`Require*` adds security and `401`/`403`, and errors are documented as
+problem details. Refine it with tags on fields and metadata on routes:
+
+```go
+type Role string
+func (Role) EnumValues() []string { return []string{"admin", "user"} }
+
+type ListUsers struct {
+    Page  int    `query:"page" default:"1" validate:"min=1" doc:"1-based page number"`
+    Sort  string `query:"sort" enum:"name,age" default:"name"`
+    Role  Role   `query:"role"`                     // enum from the type
+    Since *time.Time `query:"since" example:"2026-01-01T00:00:00Z"`
+}
+
+users.Get("", list).Summary("List users").Tags("users").Errors(404)
+users.Post("", create).Success(201).Deprecated()
+app.Get("/internal", probe).Hide()
+```
+
+| Tag | Effect |
+|---|---|
+| `doc:"..."` | description |
+| `example:"..."` | example, parsed as the field type |
+| `default:"..."` | default in the spec **and** applied when the request omits the value |
+| `enum:"a,b,c"` | allowed values, documented and validated |
+| `format:"..."` | JSON Schema format (`uri`, `email`, `date`, ...) |
+| `deprecated:"true"` | marks the field deprecated |
+| `validate:"..."` | `required`, `min`/`max`, `minlen`/`maxlen`, `oneof`, `email` become schema keywords |
+
+Types implementing `EnumValues() []string` are string enums everywhere they
+appear, including inside slices. `uuid.UUID`, `time.Time`, `time.Duration`,
+`[]byte` and any `encoding.TextMarshaler` get the right string format.
+Pointers are nullable; fields are required when `validate:"required"` says
+so, and in output-only types every non-nullable field is required.
 
 ## Groups and middleware
 
@@ -231,7 +277,7 @@ curl localhost:8080/me                 # 401 problem with WWW-Authenticate: Bear
 
 ## Roadmap
 
-- [ ] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
+- [x] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
 - [ ] Form and multipart request bodies
 - [ ] Server-sent events over `iter.Seq`
 - [ ] Benchmarks, then a custom radix router behind the same API

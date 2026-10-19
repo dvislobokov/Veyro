@@ -30,15 +30,17 @@ type boundField struct {
 	index []int
 	name  string
 	src   source
+	def   *reflect.Value // parsed `default` tag, applied when the source has no value
 }
 
 // binder knows how to fill one input type from a request.
 type binder struct {
-	typ     reflect.Type
-	isNone  bool
-	hasBody bool
-	fields  []boundField
-	cfg     *config
+	typ      reflect.Type
+	isNone   bool
+	hasBody  bool
+	fields   []boundField
+	defaults []boundField // body fields with a `default` tag
+	cfg      *config
 }
 
 func newBinder(t reflect.Type, pattern string, cfg *config) *binder {
@@ -77,6 +79,9 @@ func (b *binder) collect(t reflect.Type, prefix []int, params map[string]bool, p
 		if !ok {
 			if f.Tag.Get("json") != "-" {
 				b.hasBody = true
+				if def, ok := f.Tag.Lookup("default"); ok {
+					b.defaults = append(b.defaults, boundField{index: idx, name: f.Name, def: parseDefault(f, def, t, pattern)})
+				}
 			}
 			continue
 		}
@@ -87,8 +92,28 @@ func (b *binder) collect(t reflect.Type, prefix []int, params map[string]bool, p
 		if err := checkConvertible(f.Type); err != nil {
 			panic(fmt.Sprintf("veyro: route %q: field %s.%s: %v", pattern, t.Name(), f.Name, err))
 		}
-		b.fields = append(b.fields, boundField{index: idx, name: name, src: src})
+		bf := boundField{index: idx, name: name, src: src}
+		if def, ok := f.Tag.Lookup("default"); ok {
+			bf.def = parseDefault(f, def, t, pattern)
+		}
+		b.fields = append(b.fields, bf)
 	}
+}
+
+// parseDefault parses a `default` tag into a value of the field's type.
+// Scalars use the same conversion as query parameters; anything else is JSON.
+func parseDefault(f reflect.StructField, def string, owner reflect.Type, pattern string) *reflect.Value {
+	v := reflect.New(f.Type).Elem()
+	var err error
+	if checkConvertible(f.Type) == nil {
+		err = setFromStrings(v, strings.Split(def, ","))
+	} else {
+		err = json.Unmarshal([]byte(def), v.Addr().Interface())
+	}
+	if err != nil {
+		panic(fmt.Sprintf("veyro: route %q: field %s.%s: bad default %q: %v", pattern, owner.Name(), f.Name, def, err))
+	}
+	return &v
 }
 
 func hasSourceTag(f reflect.StructField) bool {
@@ -142,6 +167,9 @@ func (b *binder) bind(r *http.Request, v reflect.Value) (ValidationErrors, error
 		errs.Add(field, msg)
 	}
 
+	for _, f := range b.defaults {
+		v.FieldByIndex(f.index).Set(*f.def)
+	}
 	if b.hasBody && hasBody(r) {
 		if err := b.decodeBody(r, v); err != nil {
 			var mbe *http.MaxBytesError
@@ -180,6 +208,9 @@ func (b *binder) bind(r *http.Request, v reflect.Value) (ValidationErrors, error
 			}
 		}
 		if len(vals) == 0 {
+			if f.def != nil {
+				v.FieldByIndex(f.index).Set(*f.def)
+			}
 			continue
 		}
 		if err := setFromStrings(v.FieldByIndex(f.index), vals); err != nil {

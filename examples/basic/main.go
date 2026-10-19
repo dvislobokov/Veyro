@@ -5,6 +5,7 @@
 //	curl localhost:8080/users/<id>?expand=profile
 //	curl -X POST localhost:8080/users -H 'Authorization: Bearer ann' -H 'Content-Type: application/json' -d '{"name":"A"}'   # validation problem
 //	curl localhost:8080/me                                  # 401 with WWW-Authenticate: Bearer
+//	open http://localhost:8080/docs                         # interactive API reference
 //	curl -X DELETE localhost:8080/users/<id> -H 'Authorization: Bearer ann'   # 403
 package main
 
@@ -20,27 +21,35 @@ import (
 	"github.com/dvislobokov/veyro"
 )
 
+// Role is a string enum: validated on input, documented in OpenAPI.
+type Role string
+
+func (Role) EnumValues() []string { return []string{"admin", "user"} }
+
 type User struct {
 	ID    uuid.UUID `json:"id"`
-	Name  string    `json:"name"`
-	Email string    `json:"email"`
-	Age   int       `json:"age"`
+	Name  string    `json:"name" example:"Ann"`
+	Email string    `json:"email" format:"email"`
+	Age   int       `json:"age" example:"30"`
+	Role  Role      `json:"role"`
 }
 
 type CreateUser struct {
-	Name  string `json:"name" validate:"required,minlen=2,maxlen=64"`
-	Email string `json:"email" validate:"required,email"`
-	Age   int    `json:"age" validate:"min=18,max=130"`
+	Name  string `json:"name" validate:"required,minlen=2,maxlen=64" example:"Ann" doc:"Display name"`
+	Email string `json:"email" validate:"required,email" example:"ann@example.com"`
+	Age   int    `json:"age" validate:"min=18,max=130" example:"30"`
+	Role  Role   `json:"role" default:"user"`
 }
 
 type GetUser struct {
-	ID     uuid.UUID `path:"id"`
-	Expand []string  `query:"expand"`
+	ID     uuid.UUID `path:"id" doc:"User id (UUIDv7)"`
+	Expand []string  `query:"expand" enum:"profile,settings" doc:"Related objects to include"`
 }
 
 type ListUsers struct {
-	Page    int `query:"page" validate:"min=1"`
-	PerPage int `query:"per_page" validate:"max=100"`
+	Page    int    `query:"page" default:"1" validate:"min=1" doc:"1-based page number"`
+	PerPage int    `query:"per_page" default:"20" validate:"min=1,max=100"`
+	Sort    string `query:"sort" enum:"name,age" default:"name"`
 }
 
 type store struct {
@@ -49,7 +58,7 @@ type store struct {
 }
 
 func (s *store) create(c *veyro.Context, in CreateUser) (User, error) {
-	u := User{ID: uuid.NewV7(), Name: in.Name, Email: in.Email, Age: in.Age}
+	u := User{ID: uuid.NewV7(), Name: in.Name, Email: in.Email, Age: in.Age, Role: in.Role}
 	s.mu.Lock()
 	s.users[u.ID] = u
 	s.mu.Unlock()
@@ -100,17 +109,23 @@ func main() {
 
 	app := veyro.New()
 	app.Use(veyro.Logger(slog.Default()))
-	app.Use(veyro.Authentication(veyro.Bearer(lookupToken)))
+	app.UseAuthentication(veyro.Bearer(lookupToken))
 
-	users := app.Group("/users").RequireAuthorization()
-	users.Post("", db.create)
-	users.Get("", db.list).AllowAnonymous()
-	users.Get("/{id}", db.get).AllowAnonymous()
-	users.Delete("/{id}", db.remove).RequireRole("admin")
+	users := app.Group("/users").Tags("users").RequireAuthorization()
+	users.Post("", db.create).Summary("Create a user").Success(201)
+	users.Get("", db.list).Summary("List users").AllowAnonymous()
+	users.Get("/{id}", db.get).Summary("Get a user").Errors(404).AllowAnonymous()
+	users.Delete("/{id}", db.remove).Summary("Delete a user").RequireRole("admin")
 
 	app.Get("/me", func(c *veyro.Context, _ veyro.None) (*veyro.User, error) {
 		return c.User(), nil
-	}).RequireAuthorization()
+	}).Tags("auth").Summary("Current user").RequireAuthorization()
+
+	app.ServeDocs("/docs", veyro.Info{
+		Title:       "Users API",
+		Version:     "1.0.0",
+		Description: "Example service built with Veyro.",
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

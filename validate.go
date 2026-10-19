@@ -3,6 +3,7 @@ package veyro
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,32 @@ import (
 // Use a pointer when zero must be checked too: *int with min=1 rejects 0. Nested structs,
 // slices and maps are validated recursively; their errors are keyed like
 // "address.city" and "items[0].price". Messages follow ASP.NET Core.
+
+// Enum is implemented by string-like types with a fixed set of values:
+//
+//	type Role string
+//	func (Role) EnumValues() []string { return []string{"admin", "user"} }
+//
+// Values are validated against the set and documented as an enum in OpenAPI.
+type Enum interface {
+	EnumValues() []string
+}
+
+var enumType = reflect.TypeFor[Enum]()
+
+// enumValues returns the enum set for t, from the Enum interface, or nil.
+func enumValues(t reflect.Type) []string {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	if t.Implements(enumType) {
+		return reflect.Zero(t).Interface().(Enum).EnumValues()
+	}
+	if reflect.PointerTo(t).Implements(enumType) {
+		return reflect.New(t).Interface().(Enum).EnumValues()
+	}
+	return nil
+}
 
 type rule struct {
 	name string
@@ -68,6 +95,10 @@ func rulesFor(t reflect.Type) *typeRules {
 		if tag, ok := f.Tag.Lookup("validate"); ok {
 			fr.rules = parseRules(tag, t.Name()+"."+f.Name)
 		}
+		// `enum:"a,b"` on the field, or an Enum type, adds a oneof rule.
+		if set := fieldEnum(f); len(set) > 0 && !slices.ContainsFunc(fr.rules, func(r rule) bool { return r.name == "oneof" }) {
+			fr.rules = append(fr.rules, rule{name: "oneof", set: set})
+		}
 		fr.nested = walkable(f.Type)
 		if f.Anonymous && !hasSourceTag(f) && f.Tag.Get("json") == "" {
 			fr.name = "" // embedded: fields are promoted, no prefix
@@ -94,6 +125,20 @@ func errorKey(f reflect.StructField) string {
 		}
 	}
 	return f.Name
+}
+
+// fieldEnum returns the enum set declared for a field by tag or by type.
+func fieldEnum(f reflect.StructField) []string {
+	if tag, ok := f.Tag.Lookup("enum"); ok {
+		var set []string
+		for v := range strings.SplitSeq(tag, ",") {
+			if v = strings.TrimSpace(v); v != "" {
+				set = append(set, v)
+			}
+		}
+		return set
+	}
+	return enumValues(f.Type)
 }
 
 func walkable(t reflect.Type) bool {
@@ -227,13 +272,17 @@ func applyRule(r rule, v reflect.Value, name string) string {
 			return fmt.Sprintf("The field %s must be a string or array type with a maximum length of '%d'.", name, r.n)
 		}
 	case "oneof":
-		s := fmt.Sprint(v.Interface())
-		for _, allowed := range r.set {
-			if s == allowed {
-				return ""
+		if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+			for i := range v.Len() {
+				if !slices.Contains(r.set, fmt.Sprint(v.Index(i).Interface())) {
+					return fmt.Sprintf("The field %s must contain only: %s.", name, strings.Join(r.set, ", "))
+				}
 			}
+			return ""
 		}
-		return fmt.Sprintf("The field %s must be one of: %s.", name, strings.Join(r.set, ", "))
+		if !slices.Contains(r.set, fmt.Sprint(v.Interface())) {
+			return fmt.Sprintf("The field %s must be one of: %s.", name, strings.Join(r.set, ", "))
+		}
 	case "email":
 		if v.Kind() == reflect.String && !looksLikeEmail(v.String()) {
 			return fmt.Sprintf("The %s field is not a valid e-mail address.", name)

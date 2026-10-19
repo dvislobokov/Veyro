@@ -31,7 +31,7 @@ type Validator interface {
 
 var noneType = reflect.TypeFor[None]()
 
-func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) http.Handler {
+func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) (http.Handler, *binder) {
 	b := newBinder(reflect.TypeFor[In](), pattern, &app.cfg)
 	outNone := reflect.TypeFor[Out]() == noneType
 
@@ -73,7 +73,7 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) http.Handl
 			return
 		}
 		app.render(c, out, outNone)
-	})
+	}), b
 }
 
 func (a *App) render(c *Context, out any, outNone bool) {
