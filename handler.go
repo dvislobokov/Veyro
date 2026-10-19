@@ -2,12 +2,12 @@ package veyro
 
 import (
 	"bytes"
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"reflect"
 	"sync"
+	"unsafe"
 
 	"github.com/dvislobokov/srog"
 )
@@ -26,18 +26,18 @@ type Renderer interface {
 	Render(w http.ResponseWriter, r *http.Request) error
 }
 
-// Validator is implemented by input types that need custom validation.
-// Return a ValidationErrors to report field errors, a *Problem to answer with
-// a specific status, or any other error to fail with 500.
-type Validator interface {
-	Validate(ctx context.Context) error
-}
-
 var noneType = reflect.TypeFor[None]()
 
 func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) (http.Handler, *binder) {
 	b := newBinder(reflect.TypeFor[In](), pattern, &app.cfg)
 	outNone := reflect.TypeFor[Out]() == noneType
+	var vw *walker
+	if !b.isNone {
+		vw = walkerFor(reflect.TypeFor[In]()) // compiles and validates the rules now
+		if !vw.active {
+			vw = nil
+		}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := newContext(app, w, r)
@@ -50,20 +50,11 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) (http.Hand
 				app.writeError(w, r, err)
 				return
 			}
-			validateValue(reflect.ValueOf(&in).Elem(), "", &errs)
-			if v, ok := any(&in).(Validator); ok {
-				if err := v.Validate(c); err != nil {
-					var ve ValidationErrors
-					if errors.As(err, &ve) {
-						if errs == nil {
-							errs = ve
-						} else {
-							errs.merge(ve)
-						}
-					} else {
-						app.writeError(w, r, err)
-						return
-					}
+			if vw != nil {
+				var stack [8]pathElem
+				if err := vw.run(c, unsafe.Pointer(&in), stack[:0], &errs); err != nil {
+					app.writeError(w, r, err)
+					return
 				}
 			}
 			if len(errs) > 0 {

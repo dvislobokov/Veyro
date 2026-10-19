@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -149,6 +150,10 @@ type Schema struct {
 	Example              any                `json:"example,omitzero"`
 	Minimum              *float64           `json:"minimum,omitzero"`
 	Maximum              *float64           `json:"maximum,omitzero"`
+	ExclusiveMinimum     *float64           `json:"exclusiveMinimum,omitzero"`
+	ExclusiveMaximum     *float64           `json:"exclusiveMaximum,omitzero"`
+	Pattern              string             `json:"pattern,omitzero"`
+	UniqueItems          bool               `json:"uniqueItems,omitzero"`
 	MinLength            *int               `json:"minLength,omitzero"`
 	MaxLength            *int               `json:"maxLength,omitzero"`
 	MinItems             *int               `json:"minItems,omitzero"`
@@ -617,12 +622,7 @@ func bodyRequired(g *generator, t reflect.Type) []string {
 }
 
 func hasRule(f reflect.StructField, name string) bool {
-	for part := range strings.SplitSeq(f.Tag.Get("validate"), ",") {
-		if n, _, _ := strings.Cut(strings.TrimSpace(part), "="); n == name {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(parseRuleSpecs(f.Tag.Get("validate")), func(r ruleSpec) bool { return r.name == name })
 }
 
 // fieldSchema builds the schema for a struct field, applying field tags.
@@ -658,31 +658,145 @@ func (g *generator) fieldSchema(f reflect.StructField, owner reflect.Type) *Sche
 	if v, ok := f.Tag.Lookup("default"); ok {
 		s.Default = parseLiteral(f.Type, v)
 	}
-	for _, r := range parseRules(f.Tag.Get("validate"), owner.Name()+"."+f.Name) {
-		switch r.name {
-		case "min":
-			s.Minimum = ptr(r.num)
-		case "max":
-			s.Maximum = ptr(r.num)
-		case "minlen":
-			if isArrayType(f.Type) {
-				s.MinItems = ptr(r.n)
-			} else {
-				s.MinLength = ptr(r.n)
+	applyRuleSchemas(s, f.Type, parseRuleSpecs(f.Tag.Get("validate")))
+	return s
+}
+
+// applyRuleSchemas maps validate rules onto JSON Schema keywords.
+func applyRuleSchemas(s *Schema, ft reflect.Type, specs []ruleSpec) {
+	t := derefType(ft)
+	numeric := isNumeric(t)
+	target := s
+	for _, r := range specs {
+		if r.name == "omitempty" || r.name == "omitnil" || r.name == "structonly" {
+			continue
+		}
+		if r.name == "dive" {
+			if s.Items == nil {
+				s.Items = &Schema{}
 			}
-		case "maxlen":
-			if isArrayType(f.Type) {
-				s.MaxItems = ptr(r.n)
+			target = s.Items
+			t = derefType(t.Elem())
+			numeric = isNumeric(t)
+			continue
+		}
+		num, _ := strconv.ParseFloat(r.param, 64)
+		n, _ := strconv.Atoi(r.param)
+		switch r.name {
+		case "min", "gte", "minlen":
+			switch {
+			case numeric:
+				target.Minimum = ptr(num)
+			case isArrayType(t):
+				target.MinItems = ptr(n)
+			default:
+				target.MinLength = ptr(n)
+			}
+		case "max", "lte", "maxlen":
+			switch {
+			case numeric:
+				target.Maximum = ptr(num)
+			case isArrayType(t):
+				target.MaxItems = ptr(n)
+			default:
+				target.MaxLength = ptr(n)
+			}
+		case "gt":
+			if numeric {
+				target.ExclusiveMinimum = ptr(num)
+			} else if isArrayType(t) {
+				target.MinItems = ptr(n + 1)
 			} else {
-				s.MaxLength = ptr(r.n)
+				target.MinLength = ptr(n + 1)
+			}
+		case "lt":
+			if numeric {
+				target.ExclusiveMaximum = ptr(num)
+			} else if isArrayType(t) {
+				target.MaxItems = ptr(n - 1)
+			} else {
+				target.MaxLength = ptr(n - 1)
+			}
+		case "len":
+			switch {
+			case numeric:
+				target.Enum = []any{num}
+			case isArrayType(t):
+				target.MinItems, target.MaxItems = ptr(n), ptr(n)
+			default:
+				target.MinLength, target.MaxLength = ptr(n), ptr(n)
+			}
+		case "eq":
+			if numeric {
+				target.Enum = []any{num}
+			} else {
+				target.Enum = []any{r.param}
 			}
 		case "oneof":
-			s.Enum = toAny(r.set)
+			if numeric {
+				var vals []any
+				for v := range strings.FieldsSeq(r.param) {
+					f, _ := strconv.ParseFloat(v, 64)
+					vals = append(vals, f)
+				}
+				target.Enum = vals
+			} else {
+				target.Enum = toAny(strings.Fields(r.param))
+			}
+		case "regex":
+			target.Pattern = r.param
 		case "email":
-			s.Format = "email"
+			target.Format = "email"
+		case "url", "http_url":
+			target.Format = "uri"
+		case "uri":
+			target.Format = "uri-reference"
+		case "uuid":
+			target.Format = "uuid"
+		case "ipv4":
+			target.Format = "ipv4"
+		case "ipv6":
+			target.Format = "ipv6"
+		case "hostname", "fqdn":
+			target.Format = "hostname"
+		case "datetime":
+			switch r.param {
+			case time.RFC3339, time.RFC3339Nano:
+				target.Format = "date-time"
+			case time.DateOnly:
+				target.Format = "date"
+			case time.TimeOnly:
+				target.Format = "time"
+			}
+		case "unique":
+			target.UniqueItems = true
+		case "alpha":
+			target.Pattern = "^[A-Za-z]*$"
+		case "alphanum":
+			target.Pattern = "^[A-Za-z0-9]*$"
+		case "numeric", "number":
+			target.Pattern = "^-?[0-9]+(\\.[0-9]+)?$"
+		case "hexadecimal":
+			target.Pattern = "^(0[xX])?[0-9a-fA-F]+$"
+		case "hexcolor":
+			target.Pattern = "^#?([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+		case "e164":
+			target.Pattern = "^\\+[1-9][0-9]{1,14}$"
+		case "startswith":
+			target.Pattern = "^" + regexp.QuoteMeta(r.param)
+		case "endswith":
+			target.Pattern = regexp.QuoteMeta(r.param) + "$"
+		case "contains":
+			target.Pattern = regexp.QuoteMeta(r.param)
+		default:
+			customRulesMu.RLock()
+			cr, ok := customRules[r.name]
+			customRulesMu.RUnlock()
+			if ok && cr.Schema != nil {
+				cr.Schema(target, r.param)
+			}
 		}
 	}
-	return s
 }
 
 func isArrayType(t reflect.Type) bool {

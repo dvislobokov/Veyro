@@ -96,28 +96,42 @@ Use `veyro.None` for handlers without input; return `veyro.None` for
 
 ## Validation
 
-Rules live in the `validate` tag and run before your handler is called.
+Rules live in the `validate` tag, with validator v10 syntax, and run before
+your handler is called. Veyro's validator is its own: rules are compiled
+once per type into type-specialised checks, values are read in place, and
+a valid input is validated with **zero allocations**, about six times
+faster than validator v10 on the same struct (see `bench/`).
 
-| Rule | Meaning |
+| Group | Rules |
 |---|---|
-| `required` | not the zero value |
-| `min=N`, `max=N` | numeric bounds |
-| `minlen=N`, `maxlen=N` | length of a string, slice or map |
-| `oneof=a b c` | one of the listed values |
-| `email` | looks like an e-mail address |
+| Presence | `required`, `required_if=Field value`, `required_unless`, `required_with=F1 F2`, `required_with_all`, `required_without`, `required_without_all` |
+| Numbers and lengths | `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `eq`, `ne` (value for numbers, length for strings, slices, maps) |
+| Strings | `eq`, `ne`, `contains`, `excludes`, `startswith`, `endswith`, `alpha`, `alphanum`, `alphaunicode`, `alphanumunicode`, `numeric`, `lowercase`, `uppercase`, `ascii`, `printascii`, `boolean`, `oneof=a b c`, `regex=…` |
+| Formats | `email`, `url`, `http_url`, `uri`, `uuid`, `ip`, `ipv4`, `ipv6`, `cidr`, `mac`, `hostname`, `fqdn`, `datetime=layout`, `base64`, `json`, `hexadecimal`, `hexcolor`, `e164` |
+| Cross-field | `eqfield`, `nefield`, `gtfield`, `gtefield`, `ltfield`, `ltefield` (numbers, strings, `time.Time`) |
+| Collections | `dive` (rules after it apply to elements), `unique`; a string rule on `[]string` applies to every element |
 
-A zero value means "not provided", so only `required` complains about it;
-use a pointer when zero itself must be checked. Nested structs, slices and
-maps are validated recursively. For cross-field rules implement `Validator`:
+A zero value means "not provided": only the presence rules complain about
+it, so optional fields with rules work without pointers (`omitempty` is
+accepted and does nothing). Use a pointer when zero must be checked.
+Nested structs, slices and maps are validated recursively with keys like
+`items[2].price`. Enums (`enum:"a,b"` tag or an `EnumValues()` type) match
+case-insensitively and are rewritten to the canonical spelling.
+
+For cross-field logic implement `Validate(ctx) error` or, sconf-style,
+`Validate() error`; it runs on every nested value after its fields:
 
 ```go
 func (s *Signup) Validate(ctx context.Context) error {
-    if s.Password != s.Confirm {
-        return veyro.Invalid("confirm", "Passwords do not match.")
+    if taken(ctx, s.Email) {
+        return veyro.Invalid("email", "This e-mail is already registered.")
     }
     return nil
 }
 ```
+
+Custom rules are a `veyro.RegisterRule("even", veyro.Rule{Check: ..., Message: ...})`
+away, and `veyro.Validate(ctx, &v)` validates anything outside a handler.
 
 ## Errors are problem details
 

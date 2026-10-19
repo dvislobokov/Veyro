@@ -26,6 +26,20 @@ numbers vary by about 10% between runs; treat them as ranks, not constants):
 | Chi v5 | 650 | 3 | 2 500 | 12 |
 | net/http ServeMux | 520 | 3 | 2 100 | 11 |
 
+**Validation** (`BenchmarkValidate_*`): the same nested struct (two
+addresses, three items, slices with `dive`, a cross-field rule, formats)
+validated by Veyro and by go-playground/validator v10 with equivalent tags:
+
+| | valid input ns/op | allocs | invalid input ns/op | allocs |
+|---|---:|---:|---:|---:|
+| Veyro | 1 050 | 0 | 3 800 | 44 |
+| validator v10 | 6 700 | 51 | 7 300 | 77 |
+
+Veyro compiles each type's rules once into checks specialised for the
+field's kind and reads values through field offsets, so the happy path
+touches no `reflect.Value` and allocates nothing; errors cost allocations
+only when they occur (keys and messages are built lazily).
+
 How to read this:
 
 - On a realistic endpoint Veyro is level with Echo and ahead of Gin, while
