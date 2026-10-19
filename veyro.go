@@ -16,7 +16,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 	"uuid"
@@ -60,7 +62,7 @@ func WithRequestID(fn func(*http.Request) string) Option {
 // App is the root router. It implements http.Handler.
 type App struct {
 	Router
-	mux     *http.ServeMux
+	tree    *tree
 	cfg     config
 	once    sync.Once
 	chain   http.Handler
@@ -72,7 +74,7 @@ type App struct {
 // New creates an App.
 func New(opts ...Option) *App {
 	app := &App{
-		mux: http.NewServeMux(),
+		tree: newTree(),
 		cfg: config{
 			logger:    slog.Default(),
 			maxBody:   4 << 20,
@@ -93,11 +95,39 @@ func defaultRequestID(r *http.Request) string {
 	return uuid.NewV7().String()
 }
 
-type appKey struct{}
+// reqInfo is the single per-request value Veyro stores in the context:
+// one allocation instead of one per fact.
+type reqInfo struct {
+	app     *App
+	traceID string
+	route   *Route
+}
+
+type reqKey struct{}
+
+// reqCtx carries reqInfo inline: one allocation for context and info.
+type reqCtx struct {
+	context.Context
+	info reqInfo
+}
+
+func (c *reqCtx) Value(key any) any {
+	if key == (reqKey{}) {
+		return &c.info
+	}
+	return c.Context.Value(key)
+}
+
+func infoFrom(ctx context.Context) *reqInfo {
+	i, _ := ctx.Value(reqKey{}).(*reqInfo)
+	return i
+}
 
 func appFrom(ctx context.Context) *App {
-	a, _ := ctx.Value(appKey{}).(*App)
-	return a
+	if i := infoFrom(ctx); i != nil {
+		return i.app
+	}
+	return nil
 }
 
 // UseAuthentication installs Authentication(auths...) as app middleware and
@@ -183,7 +213,8 @@ func (g *Router) collect() []Middleware {
 }
 
 // Handle registers a typed handler. The pattern uses net/http.ServeMux syntax
-// ("/users/{id}", "/files/{path...}", "/{$}"). In and Out are inferred from h.
+// ("/users/{id}", "/files/{path...}", "/static/", "/{$}"); see tree for the
+// rules. In and Out are inferred from h.
 //
 // In is bound from the request: fields tagged path, query, header or cookie
 // come from those sources; everything else is decoded from the JSON body.
@@ -228,10 +259,7 @@ func (g *Router) Raw(method, pattern string, h http.Handler) *Route {
 
 func (g *Router) route(method, full string, h http.Handler) *Route {
 	rt := &Route{router: g, Method: method, Pattern: full, handler: h}
-	if method != "" {
-		full = method + " " + full
-	}
-	g.app.mux.Handle(full, rt)
+	g.app.tree.add(method, full, rt)
 	g.app.routes = append(g.app.routes, rt)
 	return rt
 }
@@ -268,12 +296,12 @@ type routeMeta struct {
 	deprecated, hidden                bool
 }
 
-type routeKey struct{}
-
 // RouteFrom returns the matched route for a request context, or nil.
 func RouteFrom(ctx context.Context) *Route {
-	rt, _ := ctx.Value(routeKey{}).(*Route)
-	return rt
+	if i := infoFrom(ctx); i != nil {
+		return i.route
+	}
+	return nil
 }
 
 // Use adds middleware to this route only.
@@ -356,7 +384,11 @@ func (rt *Route) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		mw := append(rt.router.collect(), rt.mw...)
 		rt.chain = wrap(rt.handler, mw)
 	})
-	r = r.WithContext(context.WithValue(r.Context(), routeKey{}, rt))
+	if i := infoFrom(r.Context()); i != nil {
+		i.route = rt
+	} else { // served outside an App (tests, composition)
+		r = r.WithContext(&reqCtx{Context: r.Context(), info: reqInfo{app: rt.router.app, route: rt}})
+	}
 	rt.chain.ServeHTTP(w, r)
 }
 
@@ -373,8 +405,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id := a.cfg.requestID(r)
 	w.Header().Set("X-Request-Id", id)
-	ctx := context.WithValue(r.Context(), traceKey{}, id)
-	ctx = context.WithValue(ctx, appKey{}, a)
+	ctx := &reqCtx{Context: r.Context(), info: reqInfo{app: a, traceID: id}}
 	r = r.WithContext(ctx)
 
 	defer func() {
@@ -390,43 +421,29 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.chain.ServeHTTP(w, r)
 }
 
-// serve dispatches to the mux, turning its plain-text 404/405 into problems.
+// serve resolves the route and dispatches, answering 404/405 with problems
+// and redirecting unclean paths like ServeMux does.
 func (a *App) serve(w http.ResponseWriter, r *http.Request) {
-	h, pattern := a.mux.Handler(r)
-	if pattern != "" {
-		// ServeMux.ServeHTTP matches again, but it is the only way to get
-		// path values populated on r.
-		a.mux.ServeHTTP(w, r)
-		return
-	}
-	probe := &probeWriter{header: http.Header{}}
-	h.ServeHTTP(probe, r)
-	switch probe.status {
-	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		if allow := probe.header.Get("Allow"); allow != "" {
-			w.Header().Set("Allow", allow)
+	res := a.tree.match(r.Method, r.URL.EscapedPath())
+	switch {
+	case res.route != nil:
+		for _, p := range res.params[:res.n] {
+			r.SetPathValue(p.name, p.value)
 		}
-		a.writeProblem(w, r, NewProblem(probe.status, ""))
+		res.route.ServeHTTP(w, r)
+	case res.redirect != "":
+		if r.Method == http.MethodConnect {
+			a.writeProblem(w, r, NewProblem(http.StatusNotFound, ""))
+			return
+		}
+		u := &url.URL{Path: res.redirect, RawQuery: r.URL.RawQuery}
+		http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
+	case len(res.allow) > 0:
+		w.Header().Set("Allow", strings.Join(res.allow, ", "))
+		a.writeProblem(w, r, NewProblem(http.StatusMethodNotAllowed, ""))
 	default:
-		h.ServeHTTP(w, r)
+		a.writeProblem(w, r, NewProblem(http.StatusNotFound, ""))
 	}
-}
-
-// probeWriter records the status the mux would send without writing anything.
-type probeWriter struct {
-	header http.Header
-	status int
-}
-
-func (p *probeWriter) Header() http.Header { return p.header }
-func (p *probeWriter) WriteHeader(code int) {
-	if p.status == 0 {
-		p.status = code
-	}
-}
-func (p *probeWriter) Write(b []byte) (int, error) {
-	p.WriteHeader(http.StatusOK)
-	return len(b), nil
 }
 
 // Run serves on addr until ctx is cancelled, then shuts down gracefully.

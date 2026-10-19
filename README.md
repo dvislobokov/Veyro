@@ -285,8 +285,10 @@ api.Raw("GET", "/metrics", promhttp.Handler())
 Middleware chains are built lazily on the first request, so `Use` and
 `Require*` can be called in any order relative to route registration.
 
-Routes use `net/http.ServeMux` patterns: `/users/{id}`, `/files/{path...}`,
-`/{$}`. `App` itself is an `http.Handler`, so it drops into any server.
+Routes use `net/http.ServeMux` pattern syntax on Veyro's own radix router:
+`/users/{id}`, `/files/{path...}`, `/static/`, `/{$}`. Literal segments win
+over wildcards, wrong methods get `405` with `Allow`, and lookups allocate
+nothing. `App` itself is an `http.Handler`, so it drops into any server.
 
 ## Example
 
@@ -303,7 +305,7 @@ curl localhost:8080/me                 # 401 problem with WWW-Authenticate: Bear
 - [x] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
 - [ ] Form and multipart request bodies
 - [ ] Server-sent events over `iter.Seq`
-- [ ] Benchmarks, then a custom radix router behind the same API
+- [x] Custom radix router with `ServeMux` pattern syntax
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the design notes and decisions.
 

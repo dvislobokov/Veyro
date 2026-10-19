@@ -6,10 +6,7 @@ import (
 	"net/http"
 )
 
-type (
-	ctxKey   struct{}
-	traceKey struct{}
-)
+type ctxKey struct{}
 
 // Context is the per-request context handed to handlers. It implements
 // context.Context (it is the request context plus a reference to itself), so
@@ -109,6 +106,8 @@ func (c *Context) statusOr(def int) int {
 // TraceID returns the request id for any context derived from a request
 // served by an App. Prefer Context.TraceID inside handlers.
 func TraceID(ctx context.Context) string {
-	id, _ := ctx.Value(traceKey{}).(string)
-	return id
+	if i := infoFrom(ctx); i != nil {
+		return i.traceID
+	}
+	return ""
 }
