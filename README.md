@@ -17,19 +17,21 @@ type CreateUser struct {
     Email string `json:"email" validate:"required,email"`
 }
 
-func createUser(ctx context.Context, in CreateUser) (User, error) {
-    u := User{ID: uuid.NewV7(), Name: in.Name, Email: in.Email}
-    veyro.Created(ctx, "/users/"+u.ID.String())
+func createUser(c *veyro.Context, in CreateUser) (User, error) {
+    u := User{ID: uuid.NewV7(), Name: in.Name, Email: in.Email, Owner: c.User().ID()}
+    c.Created("/users/" + u.ID.String())
     return u, nil
 }
 
 app := veyro.New()
-app.Post("/users", createUser) // In and Out inferred from the handler
+app.Use(veyro.Authentication(veyro.Bearer(verifyToken)))
+app.Post("/users", createUser).RequireRole("admin") // In and Out inferred
 app.Run(ctx, ":8080")
 ```
 
-That's a complete endpoint: JSON decoding, validation, status code, error
-handling and a problem-details response for anything that goes wrong.
+That's a complete endpoint: authentication, authorization, JSON decoding,
+validation, status code, and a problem-details response for anything that
+goes wrong.
 
 ---
 
@@ -38,13 +40,15 @@ handling and a problem-details response for anything that goes wrong.
 Go 1.27 added [**generic methods**](https://go.dev/doc/go1.27). Veyro is the
 first framework built on them: `app.Post` carries its own type parameters, so a
 handler is just a function from input to output. No `Register[In, Out](...)`
-helpers, no `c.Bind(&req)`, no `func(w, r)`.
+helpers, no `c.Bind(&req)`, no `func(w, r)`. The request context, user and
+response controls live on `*veyro.Context`, which is itself a `context.Context`.
 
 | | Veyro | Gin / Echo / Fiber | Huma | net/http |
 |---|:---:|:---:|:---:|:---:|
 | Typed input and output | ✅ | ❌ | ✅ | ❌ |
 | Fluent `app.Post(path, fn)` | ✅ | ✅ | ❌ | ✅ |
-| Plain `context.Context` in handlers | ✅ | ❌ | ✅ | ✅ |
+| Handler context usable as `context.Context` | ✅ | ❌ | ✅ | ✅ |
+| Built-in `User`, authentication, `RequireRole` | ✅ | ❌ | ❌ | ❌ |
 | Path, query, headers and body in one struct | ✅ | ❌ | partially | ❌ |
 | Problem details (RFC 9457) everywhere | ✅ | ❌ | ✅ | ❌ |
 | Works with any `net/http` middleware | ✅ | ❌ | ✅ | ✅ |
@@ -75,7 +79,7 @@ type UpdateUser struct {
     Role  string  `json:"role"  validate:"oneof=admin user"`
 }
 
-app.Put("/users/{id}", func(ctx context.Context, in UpdateUser) (User, error) { ... })
+app.Put("/users/{id}", func(c *veyro.Context, in UpdateUser) (User, error) { ... })
 ```
 
 Supported for `path`, `query`, `header` and `cookie`: strings, bools, ints,
@@ -143,17 +147,57 @@ Any other error becomes a `500` with no detail leaked (turn on
 unsupported media types, oversized bodies and panics all answer with problems
 too, and every response carries an `X-Request-Id`.
 
-## Shaping the response
+## The Context
+
+`*veyro.Context` is Veyro's `HttpContext`. It embeds the request context, so
+`db.QueryContext(c, ...)` and `context.WithTimeout(c, ...)` just work, and
+`veyro.ContextFrom(ctx)` finds it again from any derived context.
 
 ```go
-veyro.SetStatus(ctx, http.StatusAccepted)
-veyro.Header(ctx).Set("Cache-Control", "no-store")
-veyro.SetCookie(ctx, &http.Cookie{Name: "sid", Value: sid})
-veyro.Created(ctx, "/orders/42")
+c.Request                       // *http.Request
+c.User()                        // never nil; anonymous when unauthenticated
+c.Status(http.StatusAccepted)   // status for the encoded result
+c.Created("/orders/42")         // 201 + Location
+c.Header().Set("Cache-Control", "no-store")
+c.SetCookie(&http.Cookie{Name: "sid", Value: sid})
+c.TraceID()                     // request id
+c.Logger()                      // slog.Logger with traceId attached
 ```
 
-Need full control? Return a type that implements `Renderer` and write the
-response yourself: redirects, files, server-sent events, HTML.
+Need full control over the body? Return a type that implements `Renderer`
+and write the response yourself: redirects, files, server-sent events, HTML.
+
+## Users, authentication and authorization
+
+`veyro.User` is a `ClaimsPrincipal`: a name, the scheme that authenticated
+it and a list of claims, with `IsAuthenticated`, `ID`, `IsInRole`, `HasClaim`,
+`FindFirst` and friends.
+
+```go
+func verifyToken(ctx context.Context, token string) (*veyro.User, error) {
+    claims, err := jwt.Verify(token)          // your JWT library
+    if err != nil {
+        return nil, err                       // 401 with this detail where auth is required
+    }
+    return veyro.NewUser("Bearer", claims.Name).
+        AddClaim(veyro.ClaimSubject, claims.Sub).
+        AddClaim(veyro.ClaimRole, "admin"), nil
+}
+
+app.Use(veyro.Authentication(veyro.Bearer(verifyToken)))
+
+app.Get("/me", me).RequireAuthorization()
+app.Get("/admin", dashboard).RequireRole("admin", "owner")
+app.Get("/tenant", tenant).RequireClaim("tenant", "acme")
+
+admin := app.Group("/admin").RequireRole("admin")
+admin.Get("/health", health).AllowAnonymous()  // opt out, like [AllowAnonymous]
+```
+
+Requests without credentials run as anonymous until a requirement is hit:
+then they get a `401` problem with `WWW-Authenticate`; authenticated users
+failing a policy get `403`. Write your own `Policy` for anything else, and
+plug any scheme by implementing `Authenticator`.
 
 ## Groups and middleware
 
@@ -164,10 +208,13 @@ otelhttp middleware work unchanged.
 app := veyro.New(veyro.WithLogger(logger))
 app.Use(veyro.Logger(logger))          // every request, 404s included
 
-api := app.Group("/api/v1", auth)
-api.Get("/me", me)
+api := app.Group("/api/v1", rateLimit)
+api.Get("/me", me).Use(cache)          // per-route middleware
 api.Raw("GET", "/metrics", promhttp.Handler())
 ```
+
+Middleware chains are built lazily on the first request, so `Use` and
+`Require*` can be called in any order relative to route registration.
 
 Routes use `net/http.ServeMux` patterns: `/users/{id}`, `/files/{path...}`,
 `/{$}`. `App` itself is an `http.Handler`, so it drops into any server.
@@ -176,8 +223,10 @@ Routes use `net/http.ServeMux` patterns: `/users/{id}`, `/files/{path...}`,
 
 ```sh
 go run ./examples/basic
-curl -X POST localhost:8080/users -H 'Content-Type: application/json' \
+curl -X POST localhost:8080/users \
+     -H 'Authorization: Bearer ann' -H 'Content-Type: application/json' \
      -d '{"name":"Ann","email":"ann@example.com","age":30}'
+curl localhost:8080/me                 # 401 problem with WWW-Authenticate: Bearer
 ```
 
 ## Roadmap

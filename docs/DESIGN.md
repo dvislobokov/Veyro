@@ -68,7 +68,11 @@ veyro/            — публичный API: App, Group, Handler, Error, Ctx
 
 ### Хендлеры
 
-Единственная «настоящая» форма — `func(ctx context.Context, in In) (Out, error)`.
+Единственная «настоящая» форма — `func(c *veyro.Context, in In) (Out, error)`.
+`*Context` реализует `context.Context` (встраивает контекст запроса), поэтому его
+можно передавать в БД и клиенты напрямую, а `veyro.ContextFrom(ctx)` находит его
+из любого производного контекста. Это аналог `HttpContext`: `Request`, `User()`,
+`Status()`, `Header()`, `SetCookie()`, `TraceID()`, `Logger()`.
 Удобные формы сводятся к ней generic-методами:
 
 ```go
@@ -79,8 +83,16 @@ func (g *Group) Post[In, Out any](pattern string, h func(context.Context, In) (O
 func (g *Group) Raw(pattern string, h http.Handler)                                        // полный доступ к w/r
 ```
 
-Доступ к низкоуровневым вещам (заголовки, статус, cookies) — через контекст:
-`veyro.RequestFrom(ctx)`, `veyro.SetStatus(ctx, 201)`, `veyro.SetHeader(ctx, ...)`.
+### Пользователь и авторизация
+
+`User` повторяет `ClaimsPrincipal`: имя, схема (`AuthType`) и список `Claim{Type, Value}`
+с методами `IsAuthenticated`, `ID`, `IsInRole`, `HasClaim`, `FindFirst`.
+`Authentication(auths...)` — middleware, перебирает схемы (`Bearer(...)` встроен,
+остальные через интерфейс `Authenticator`); без учётных данных запрос идёт как
+анонимный. `Authorize(policies...)` даёт 401 с `WWW-Authenticate` или 403.
+Fluent-API на маршрутах и группах: `.RequireAuthorization()`, `.RequireRole()`,
+`.RequireClaim()`, `.AllowAnonymous()`, `.Use()`. Цепочка middleware собирается лениво
+при первом запросе (`Route.ServeHTTP` + `sync.Once`), поэтому порядок вызовов не важен.
 
 ### Биндинг `In`
 
@@ -139,8 +151,8 @@ type Problem struct {
 
 ## Чего не делаем (на старте)
 
-- Собственный `Context`-тип в сигнатуре хендлера (как в Gin/Echo/Fiber): он мешает
-  переиспользованию хендлеров и ломает `context.Context`-идиомы.
+- `Context`, который *не* является `context.Context` (как в Gin/Echo/Fiber): наш
+  `*Context` встраивает контекст запроса, так что идиомы stdlib сохраняются.
 - Зависимости вне stdlib в ядре. Валидация, OpenAPI — отдельные пакеты.
 - Поддержка Go < 1.27: весь смысл фреймворка в generic-методах.
 

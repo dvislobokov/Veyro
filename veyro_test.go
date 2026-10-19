@@ -75,8 +75,8 @@ func do(t *testing.T, h http.Handler, method, target, body string, hdr ...string
 
 func TestBindAllSourcesIntoOneStruct(t *testing.T) {
 	app := newApp(t)
-	app.Put("/users/{id}", func(ctx context.Context, in UpdateUser) (echo, error) {
-		return echo{UpdateUser: in, Method: veyro.RequestFrom(ctx).Method, Seconds: in.Timeout.Seconds()}, nil
+	app.Put("/users/{id}", func(c *veyro.Context, in UpdateUser) (echo, error) {
+		return echo{UpdateUser: in, Method: c.Request.Method, Seconds: in.Timeout.Seconds()}, nil
 	})
 
 	id := uuid.NewV7()
@@ -111,7 +111,7 @@ func TestBindAllSourcesIntoOneStruct(t *testing.T) {
 
 func TestValidationProblemShape(t *testing.T) {
 	app := newApp(t)
-	app.Put("/users/{id}", func(ctx context.Context, in UpdateUser) (veyro.None, error) {
+	app.Put("/users/{id}", func(c *veyro.Context, in UpdateUser) (veyro.None, error) {
 		return veyro.None{}, nil
 	})
 
@@ -159,7 +159,7 @@ type bodyOnly struct {
 
 func TestMalformedJSON(t *testing.T) {
 	app := newApp(t)
-	app.Post("/u", func(ctx context.Context, in bodyOnly) (veyro.None, error) { return veyro.None{}, nil })
+	app.Post("/u", func(c *veyro.Context, in bodyOnly) (veyro.None, error) { return veyro.None{}, nil })
 
 	resp, out := do(t, app, http.MethodPost, "/u", `{"name": "A",`)
 	if resp.StatusCode != 400 {
@@ -182,7 +182,7 @@ func TestMalformedJSON(t *testing.T) {
 
 func TestUnsupportedMediaType(t *testing.T) {
 	app := newApp(t)
-	app.Post("/u", func(ctx context.Context, in bodyOnly) (veyro.None, error) { return veyro.None{}, nil })
+	app.Post("/u", func(c *veyro.Context, in bodyOnly) (veyro.None, error) { return veyro.None{}, nil })
 	req := httptest.NewRequest(http.MethodPost, "/u", strings.NewReader("name=a"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -194,7 +194,7 @@ func TestUnsupportedMediaType(t *testing.T) {
 
 func TestNotFoundAndMethodNotAllowedAreProblems(t *testing.T) {
 	app := newApp(t)
-	app.Get("/only-get", func(ctx context.Context, _ veyro.None) (veyro.None, error) { return veyro.None{}, nil })
+	app.Get("/only-get", func(c *veyro.Context, _ veyro.None) (veyro.None, error) { return veyro.None{}, nil })
 
 	resp, out := do(t, app, http.MethodGet, "/nope", "")
 	if resp.StatusCode != 404 || out["title"] != "Not Found" || out["status"] != float64(404) {
@@ -211,13 +211,13 @@ func TestNotFoundAndMethodNotAllowedAreProblems(t *testing.T) {
 
 func TestNoneOutputAndCreated(t *testing.T) {
 	app := newApp(t)
-	app.Delete("/x/{id}", func(ctx context.Context, in struct {
+	app.Delete("/x/{id}", func(c *veyro.Context, in struct {
 		ID int `path:"id"`
 	}) (veyro.None, error) {
 		return veyro.None{}, nil
 	})
-	app.Post("/x", func(ctx context.Context, _ veyro.None) (map[string]int, error) {
-		veyro.Created(ctx, "/x/7")
+	app.Post("/x", func(c *veyro.Context, _ veyro.None) (map[string]int, error) {
+		c.Created("/x/7")
 		return map[string]int{"id": 7}, nil
 	})
 
@@ -245,7 +245,7 @@ func (s *signup) Validate(ctx context.Context) error {
 
 func TestValidatorInterfaceMergesErrors(t *testing.T) {
 	app := newApp(t)
-	app.Post("/s", func(ctx context.Context, in signup) (veyro.None, error) { return veyro.None{}, nil })
+	app.Post("/s", func(c *veyro.Context, in signup) (veyro.None, error) { return veyro.None{}, nil })
 	resp, out := do(t, app, http.MethodPost, "/s", `{"password":"a","confirm":"b"}`)
 	if resp.StatusCode != 400 {
 		t.Fatalf("status %d", resp.StatusCode)
@@ -258,13 +258,18 @@ func TestValidatorInterfaceMergesErrors(t *testing.T) {
 
 func TestErrorsFromHandler(t *testing.T) {
 	app := veyro.New(veyro.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
-	app.Get("/p", func(ctx context.Context, _ veyro.None) (veyro.None, error) {
+	app.Get("/p", func(c *veyro.Context, _ veyro.None) (veyro.None, error) {
 		return veyro.None{}, veyro.NotFound("no such thing").With("resource", "thing")
 	})
-	app.Get("/boom", func(ctx context.Context, _ veyro.None) (veyro.None, error) {
+	app.Get("/boom", func(c *veyro.Context, _ veyro.None) (veyro.None, error) {
 		return veyro.None{}, errors.New("db down")
 	})
-	app.Get("/panic", func(ctx context.Context, _ veyro.None) (veyro.None, error) { panic("x") })
+	app.Get("/panic", func(c *veyro.Context, _ veyro.None) (veyro.None, error) { panic("x") })
+	app.Get("/derived", func(c *veyro.Context, _ veyro.None) (string, error) {
+		ctx, cancel := context.WithTimeout(c, time.Second) // *Context is a context.Context
+		defer cancel()
+		return veyro.ContextFrom(ctx).TraceID(), nil
+	})
 
 	resp, out := do(t, app, http.MethodGet, "/p", "")
 	if resp.StatusCode != 404 || out["detail"] != "no such thing" || out["resource"] != "thing" {
@@ -277,6 +282,11 @@ func TestErrorsFromHandler(t *testing.T) {
 	resp, out = do(t, app, http.MethodGet, "/panic", "")
 	if resp.StatusCode != 500 || out["status"] != float64(500) {
 		t.Errorf("panic: %d %v", resp.StatusCode, out)
+	}
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/derived", nil))
+	if got := strings.Trim(strings.TrimSpace(rec.Body.String()), `"`); got == "" || got != rec.Header().Get("X-Request-Id") {
+		t.Errorf("ContextFrom on derived context: body %q header %q", got, rec.Header().Get("X-Request-Id"))
 	}
 }
 
@@ -294,15 +304,15 @@ func TestGroupsAndMiddleware(t *testing.T) {
 	app.Use(mw("app"))
 	api := app.Group("/api", mw("api"))
 	v1 := api.Group("/v1")
-	v1.Use(mw("v1"))
-	v1.Get("/ping", func(ctx context.Context, _ veyro.None) (string, error) { return "pong", nil })
+	v1.Get("/ping", func(c *veyro.Context, _ veyro.None) (string, error) { return "pong", nil }).Use(mw("route"))
+	v1.Use(mw("v1")) // after registration: still applies
 
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil))
 	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `"pong"` {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if strings.Join(order, ",") != "app,api,v1" {
+	if strings.Join(order, ",") != "app,api,v1,route" {
 		t.Errorf("order = %v", order)
 	}
 	order = nil
@@ -320,7 +330,7 @@ func TestMisconfiguredRoutePanicsAtRegistration(t *testing.T) {
 			t.Fatalf("want registration panic, got %v", r)
 		}
 	}()
-	app.Get("/users", func(ctx context.Context, in struct {
+	app.Get("/users", func(c *veyro.Context, in struct {
 		ID int `path:"id"`
 	}) (veyro.None, error) {
 		return veyro.None{}, nil
@@ -336,10 +346,95 @@ func (r redirect) Render(w http.ResponseWriter, req *http.Request) error {
 
 func TestRenderer(t *testing.T) {
 	app := newApp(t)
-	app.Get("/old", func(ctx context.Context, _ veyro.None) (redirect, error) { return "/new", nil })
+	app.Get("/old", func(c *veyro.Context, _ veyro.None) (redirect, error) { return "/new", nil })
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/old", nil))
 	if rec.Code != 302 || rec.Header().Get("Location") != "/new" {
 		t.Errorf("%d %v", rec.Code, rec.Header())
+	}
+}
+
+func tokenAuth(ctx context.Context, token string) (*veyro.User, error) {
+	switch token {
+	case "admin-token":
+		return veyro.NewUser("", "root", veyro.Claim{Type: veyro.ClaimSubject, Value: "1"}).AddClaim(veyro.ClaimRole, "admin"), nil
+	case "user-token":
+		return veyro.NewUser("", "ann").AddClaim(veyro.ClaimRole, "user").AddClaim("tenant", "acme"), nil
+	}
+	return nil, errors.New("token is invalid")
+}
+
+func TestAuthenticationAndAuthorization(t *testing.T) {
+	app := newApp(t)
+	app.Use(veyro.Authentication(veyro.Bearer(tokenAuth)))
+
+	whoami := func(c *veyro.Context, _ veyro.None) (map[string]any, error) {
+		u := c.User()
+		return map[string]any{"name": u.Name, "auth": u.IsAuthenticated(), "id": u.ID(), "roles": u.Roles()}, nil
+	}
+	app.Get("/public", whoami)
+	app.Get("/me", whoami).RequireAuthorization()
+	app.Get("/admin", whoami).RequireRole("admin", "owner")
+	app.Get("/acme", whoami).RequireClaim("tenant", "acme")
+
+	secure := app.Group("/secure").RequireRole("admin")
+	secure.Get("/dash", whoami)
+	secure.Get("/health", whoami).AllowAnonymous()
+
+	cases := []struct {
+		path, token string
+		status      int
+	}{
+		{"/public", "", 200},
+		{"/public", "bad", 200}, // invalid token is only an error where auth is required
+		{"/me", "", 401},
+		{"/me", "bad", 401},
+		{"/me", "user-token", 200},
+		{"/admin", "user-token", 403},
+		{"/admin", "admin-token", 200},
+		{"/acme", "user-token", 200},
+		{"/acme", "admin-token", 403},
+		{"/secure/dash", "", 401},
+		{"/secure/dash", "user-token", 403},
+		{"/secure/dash", "admin-token", 200},
+		{"/secure/health", "", 200},
+	}
+	for _, tc := range cases {
+		var hdr []string
+		if tc.token != "" {
+			hdr = []string{"Authorization", "Bearer " + tc.token}
+		}
+		resp, out := do(t, app, http.MethodGet, tc.path, "", hdr...)
+		if resp.StatusCode != tc.status {
+			t.Errorf("GET %s token=%q: status %d, want %d (%v)", tc.path, tc.token, resp.StatusCode, tc.status, out)
+			continue
+		}
+		switch tc.status {
+		case 401:
+			if resp.Header.Get("WWW-Authenticate") != "Bearer" || out["title"] != "Unauthorized" {
+				t.Errorf("GET %s: 401 shape: %v %v", tc.path, resp.Header, out)
+			}
+			if tc.token == "bad" && out["detail"] != "token is invalid" {
+				t.Errorf("GET %s: want detail about bad token, got %v", tc.path, out)
+			}
+		case 200:
+			if tc.token == "admin-token" && (out["name"] != "root" || out["id"] != "1" || out["auth"] != true) {
+				t.Errorf("GET %s: user %v", tc.path, out)
+			}
+			if tc.token == "" && out["auth"] != false {
+				t.Errorf("GET %s: anonymous must not be authenticated: %v", tc.path, out)
+			}
+		}
+	}
+}
+
+func TestUserClaims(t *testing.T) {
+	u := veyro.NewUser("Bearer", "ann", veyro.Claim{Type: veyro.ClaimRole, Value: "user"}).AddClaim(veyro.ClaimRole, "editor")
+	if !u.IsInRole("editor") || u.IsInRole("admin") || len(u.Roles()) != 2 || u.ID() != "" {
+		t.Errorf("claims: %+v", u)
+	}
+	var nilUser *veyro.User
+	if nilUser.IsAuthenticated() || nilUser.IsInRole("x") || veyro.Anonymous().IsAuthenticated() {
+		t.Error("nil and anonymous users must be unauthenticated and safe to query")
 	}
 }

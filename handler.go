@@ -8,8 +8,9 @@ import (
 	"reflect"
 )
 
-// Handler is the shape of every veyro handler.
-type Handler[In, Out any] func(ctx context.Context, in In) (Out, error)
+// Handler is the shape of every veyro handler. *Context implements
+// context.Context, so c can be passed on to anything that needs one.
+type Handler[In, Out any] func(c *Context, in In) (Out, error)
 
 // None marks "no input" or "no output". A handler returning None answers
 // 204 No Content unless SetStatus was called.
@@ -35,10 +36,8 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) http.Handl
 	outNone := reflect.TypeFor[Out]() == noneType
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rs := &responseState{w: w}
-		ctx := context.WithValue(r.Context(), stateKey{}, rs)
-		r = r.WithContext(ctx)
-		rs.r = r
+		c := newContext(app, w, r)
+		r = c.Request
 
 		var in In
 		if !b.isNone {
@@ -52,7 +51,7 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) http.Handl
 			}
 			validateValue(reflect.ValueOf(&in).Elem(), "", errs)
 			if v, ok := any(&in).(Validator); ok {
-				if err := v.Validate(ctx); err != nil {
+				if err := v.Validate(c); err != nil {
 					var ve ValidationErrors
 					if errors.As(err, &ve) {
 						errs.merge(ve)
@@ -68,16 +67,17 @@ func adapt[In, Out any](app *App, pattern string, h Handler[In, Out]) http.Handl
 			}
 		}
 
-		out, err := h(ctx, in)
+		out, err := h(c, in)
 		if err != nil {
 			app.writeError(w, r, err)
 			return
 		}
-		app.render(w, r, rs, out, outNone)
+		app.render(c, out, outNone)
 	})
 }
 
-func (a *App) render(w http.ResponseWriter, r *http.Request, rs *responseState, out any, outNone bool) {
+func (a *App) render(c *Context, out any, outNone bool) {
+	w, r := c.w, c.Request
 	if rd, ok := out.(Renderer); ok {
 		if err := rd.Render(w, r); err != nil {
 			a.cfg.logger.ErrorContext(r.Context(), "veyro: render failed", "err", err)
@@ -85,7 +85,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, rs *responseState, 
 		return
 	}
 	if outNone {
-		w.WriteHeader(rs.statusOr(http.StatusNoContent))
+		w.WriteHeader(c.statusOr(http.StatusNoContent))
 		return
 	}
 	body, err := json.Marshal(out, a.cfg.jsonOpts...)
@@ -97,7 +97,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, rs *responseState, 
 	if h.Get("Content-Type") == "" {
 		h.Set("Content-Type", "application/json; charset=utf-8")
 	}
-	w.WriteHeader(rs.statusOr(http.StatusOK))
+	w.WriteHeader(c.statusOr(http.StatusOK))
 	_, _ = w.Write(body)
 }
 

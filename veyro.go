@@ -2,7 +2,7 @@
 //
 // Handlers are plain typed functions:
 //
-//	func createUser(ctx context.Context, in CreateUser) (User, error)
+//	func createUser(c *veyro.Context, in CreateUser) (User, error)
 //
 // Request data (path parameters, query, headers, cookies and the JSON body)
 // is bound into a single input struct, validated, and the result is encoded
@@ -16,7 +16,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
 	"uuid"
@@ -90,29 +89,61 @@ func defaultRequestID(r *http.Request) string {
 	return uuid.NewV7().String()
 }
 
-// Router is a set of routes sharing a path prefix and middleware. App embeds the root Router.
+type appKey struct{}
+
+func appFrom(ctx context.Context) *App {
+	a, _ := ctx.Value(appKey{}).(*App)
+	return a
+}
+
+// Router is a set of routes sharing a path prefix, middleware and
+// authorization requirements. App embeds the root Router.
 type Router struct {
 	app    *App
+	parent *Router
 	prefix string
 	mw     []Middleware
 }
 
 func (g *Router) isRoot() bool { return g == &g.app.Router }
 
-// Group creates a sub-group. Middleware of the parent (except the root App,
-// whose middleware wraps every request) is inherited.
+// Group creates a sub-router. Middleware and requirements added to any
+// ancestor apply, whenever they are added; the root App's middleware wraps
+// every request including 404s.
 func (g *Router) Group(prefix string, mw ...Middleware) *Router {
-	ng := &Router{app: g.app, prefix: g.prefix + prefix}
-	if !g.isRoot() {
-		ng.mw = slices.Clone(g.mw)
-	}
-	ng.mw = append(ng.mw, mw...)
-	return ng
+	return &Router{app: g.app, parent: g, prefix: g.prefix + prefix, mw: mw}
 }
 
-// Use appends middleware. On the App it applies to every request, including
-// 404/405 responses; on a sub-group it applies to routes registered afterwards.
-func (g *Router) Use(mw ...Middleware) { g.mw = append(g.mw, mw...) }
+// Use appends middleware to this router.
+func (g *Router) Use(mw ...Middleware) *Router {
+	g.mw = append(g.mw, mw...)
+	return g
+}
+
+// RequireAuthorization requires an authenticated user that satisfies every
+// policy for all routes in this router.
+func (g *Router) RequireAuthorization(policies ...Policy) *Router {
+	return g.Use(Authorize(policies...))
+}
+
+// RequireRole requires an authenticated user with one of the roles.
+func (g *Router) RequireRole(roles ...string) *Router {
+	return g.Use(Authorize(InRole(roles...)))
+}
+
+// RequireClaim requires an authenticated user with the claim.
+func (g *Router) RequireClaim(typ string, values ...string) *Router {
+	return g.Use(Authorize(HasClaim(typ, values...)))
+}
+
+// collect returns the middleware of this router and its ancestors, outermost
+// first, excluding the root (applied in App.ServeHTTP).
+func (g *Router) collect() []Middleware {
+	if g.isRoot() {
+		return nil
+	}
+	return append(g.parent.collect(), g.mw...)
+}
 
 // Handle registers a typed handler. The pattern uses net/http.ServeMux syntax
 // ("/users/{id}", "/files/{path...}", "/{$}"). In and Out are inferred from h.
@@ -120,49 +151,111 @@ func (g *Router) Use(mw ...Middleware) { g.mw = append(g.mw, mw...) }
 // In is bound from the request: fields tagged path, query, header or cookie
 // come from those sources; everything else is decoded from the JSON body.
 // Use None for handlers without input; returning None yields 204 No Content.
-func (g *Router) Handle[In, Out any](method, pattern string, h Handler[In, Out]) {
+func (g *Router) Handle[In, Out any](method, pattern string, h Handler[In, Out]) *Route {
 	full := g.prefix + pattern
-	g.handle(method, full, adapt(g.app, full, h))
+	return g.route(method, full, adapt(g.app, full, h))
 }
 
 // Get registers a GET route.
-func (g *Router) Get[In, Out any](pattern string, h Handler[In, Out]) {
-	g.Handle(http.MethodGet, pattern, h)
+func (g *Router) Get[In, Out any](pattern string, h Handler[In, Out]) *Route {
+	return g.Handle(http.MethodGet, pattern, h)
 }
 
 // Post registers a POST route.
-func (g *Router) Post[In, Out any](pattern string, h Handler[In, Out]) {
-	g.Handle(http.MethodPost, pattern, h)
+func (g *Router) Post[In, Out any](pattern string, h Handler[In, Out]) *Route {
+	return g.Handle(http.MethodPost, pattern, h)
 }
 
 // Put registers a PUT route.
-func (g *Router) Put[In, Out any](pattern string, h Handler[In, Out]) {
-	g.Handle(http.MethodPut, pattern, h)
+func (g *Router) Put[In, Out any](pattern string, h Handler[In, Out]) *Route {
+	return g.Handle(http.MethodPut, pattern, h)
 }
 
 // Patch registers a PATCH route.
-func (g *Router) Patch[In, Out any](pattern string, h Handler[In, Out]) {
-	g.Handle(http.MethodPatch, pattern, h)
+func (g *Router) Patch[In, Out any](pattern string, h Handler[In, Out]) *Route {
+	return g.Handle(http.MethodPatch, pattern, h)
 }
 
 // Delete registers a DELETE route.
-func (g *Router) Delete[In, Out any](pattern string, h Handler[In, Out]) {
-	g.Handle(http.MethodDelete, pattern, h)
+func (g *Router) Delete[In, Out any](pattern string, h Handler[In, Out]) *Route {
+	return g.Handle(http.MethodDelete, pattern, h)
 }
 
 // Raw registers a plain http.Handler. An empty method matches all methods.
-func (g *Router) Raw(method, pattern string, h http.Handler) {
-	g.handle(method, g.prefix+pattern, h)
+func (g *Router) Raw(method, pattern string, h http.Handler) *Route {
+	return g.route(method, g.prefix+pattern, h)
 }
 
-func (g *Router) handle(method, full string, h http.Handler) {
-	if !g.isRoot() {
-		h = wrap(h, g.mw)
-	}
+func (g *Router) route(method, full string, h http.Handler) *Route {
+	rt := &Route{router: g, Method: method, Pattern: full, handler: h}
 	if method != "" {
 		full = method + " " + full
 	}
-	g.app.mux.Handle(full, h)
+	g.app.mux.Handle(full, rt)
+	return rt
+}
+
+// Route is a registered endpoint. Its methods configure the endpoint fluently
+// until the first request arrives:
+//
+//	app.Get("/admin", dashboard).RequireRole("admin")
+type Route struct {
+	Method  string
+	Pattern string
+
+	router    *Router
+	handler   http.Handler
+	mw        []Middleware
+	anonymous bool
+
+	once  sync.Once
+	chain http.Handler
+}
+
+type routeKey struct{}
+
+// RouteFrom returns the matched route for a request context, or nil.
+func RouteFrom(ctx context.Context) *Route {
+	rt, _ := ctx.Value(routeKey{}).(*Route)
+	return rt
+}
+
+// Use adds middleware to this route only.
+func (rt *Route) Use(mw ...Middleware) *Route {
+	rt.mw = append(rt.mw, mw...)
+	return rt
+}
+
+// RequireAuthorization requires an authenticated user satisfying every policy.
+func (rt *Route) RequireAuthorization(policies ...Policy) *Route {
+	return rt.Use(Authorize(policies...))
+}
+
+// RequireRole requires an authenticated user with one of the roles.
+func (rt *Route) RequireRole(roles ...string) *Route {
+	return rt.Use(Authorize(InRole(roles...)))
+}
+
+// RequireClaim requires an authenticated user with the claim.
+func (rt *Route) RequireClaim(typ string, values ...string) *Route {
+	return rt.Use(Authorize(HasClaim(typ, values...)))
+}
+
+// AllowAnonymous exempts this route from Authorize requirements inherited
+// from its routers, like [AllowAnonymous] in ASP.NET Core.
+func (rt *Route) AllowAnonymous() *Route {
+	rt.anonymous = true
+	return rt
+}
+
+// ServeHTTP builds the middleware chain on first use and serves the request.
+func (rt *Route) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rt.once.Do(func() {
+		mw := append(rt.router.collect(), rt.mw...)
+		rt.chain = wrap(rt.handler, mw)
+	})
+	r = r.WithContext(context.WithValue(r.Context(), routeKey{}, rt))
+	rt.chain.ServeHTTP(w, r)
 }
 
 func wrap(h http.Handler, mw []Middleware) http.Handler {
@@ -178,14 +271,16 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id := a.cfg.requestID(r)
 	w.Header().Set("X-Request-Id", id)
-	r = r.WithContext(context.WithValue(r.Context(), traceKey{}, id))
+	ctx := context.WithValue(r.Context(), traceKey{}, id)
+	ctx = context.WithValue(ctx, appKey{}, a)
+	r = r.WithContext(ctx)
 
 	defer func() {
 		if rec := recover(); rec != nil {
 			if rec == http.ErrAbortHandler {
 				panic(rec)
 			}
-			a.cfg.logger.ErrorContext(r.Context(), "veyro: panic",
+			a.cfg.logger.ErrorContext(ctx, "veyro: panic",
 				"panic", rec, "method", r.Method, "path", r.URL.Path, "traceId", id)
 			a.writeError(w, r, errors.New("panic recovered"))
 		}
