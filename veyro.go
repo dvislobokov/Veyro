@@ -66,6 +66,7 @@ type App struct {
 	chain   http.Handler
 	routes  []*Route
 	schemes []Authenticator
+	oapi    *OpenAPIConfig
 }
 
 // New creates an App.
@@ -261,6 +262,7 @@ type Route struct {
 type routeMeta struct {
 	summary, description, operationID string
 	tags                              []string
+	security                          []map[string][]string
 	success                           int
 	errors                            []int
 	deprecated, hidden                bool
@@ -316,6 +318,18 @@ func (rt *Route) Success(status int) *Route { rt.meta.success = status; return r
 // Errors documents additional problem responses, e.g. Errors(404, 409).
 func (rt *Route) Errors(statuses ...int) *Route {
 	rt.meta.errors = append(rt.meta.errors, statuses...)
+	return rt
+}
+
+// Security documents which security scheme (and scopes) this route needs,
+// replacing the default "any registered scheme". Call it once per
+// alternative: Security("oauth2", "read:users").Security("apiKey").
+func (rt *Route) Security(scheme string, scopes ...string) *Route {
+	if scopes == nil {
+		scopes = []string{}
+	}
+	rt.meta.security = append(rt.meta.security, map[string][]string{scheme: scopes})
+	rt.requiresAuth = true
 	return rt
 }
 

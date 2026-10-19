@@ -26,7 +26,8 @@ func createUser(c *veyro.Context, in CreateUser) (User, error) {
 app := veyro.New()
 app.UseAuthentication(veyro.Bearer(verifyToken))
 app.Post("/users", createUser).RequireRole("admin") // In and Out inferred
-app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
+app.OpenAPIConfig().Title("Users API").Version("1.0.0").BearerJWT()
+app.ServeDocs(scalar.UI)
 app.Run(ctx, ":8080")
 ```
 
@@ -173,7 +174,8 @@ and write the response yourself: redirects, files, server-sent events, HTML.
 
 `veyro.User` is a `ClaimsPrincipal`: a name, the scheme that authenticated
 it and a list of claims, with `IsAuthenticated`, `ID`, `IsInRole`, `HasClaim`,
-`FindFirst` and friends.
+`FindFirst` and friends. Built-in schemes: `Bearer`, `Basic` and `APIKey`
+(header, query or cookie); anything else implements `Authenticator`.
 
 ```go
 func verifyToken(ctx context.Context, token string) (*veyro.User, error) {
@@ -206,8 +208,22 @@ plug any scheme by implementing `Authenticator`.
 ```go
 import "github.com/dvislobokov/veyro/scalar"
 
-app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
+app.OpenAPIConfig().
+    Title("Users API").Version("1.0.0").
+    Server("https://api.example.com", "production").
+    Tag("users", "User accounts").
+    BearerJWT()
+app.ServeDocs(scalar.UI)
 ```
+
+`OpenAPIConfig` starts with sensible defaults (title "API", version "1.0.0",
+server `/`, docs at `/docs`) and has helpers for every common security
+scheme: `Basic()`, `Bearer(format)`, `BearerJWT()`, `APIKey(name, in)`,
+`OIDC(discoveryURL)`, `OAuth2AuthorizationCode(...)`,
+`OAuth2ClientCredentials(...)` and raw `SecurityScheme(name, scheme)`.
+Authenticators passed to `UseAuthentication` (`Bearer`, `Basic`, `APIKey`)
+register their scheme automatically. Secured routes accept any registered
+scheme; `.Security("oauth2", "read:users")` narrows it per route.
 
 That serves `/docs/openapi.json` (OpenAPI 3.1) and an interactive
 [Scalar](https://github.com/scalar/scalar) reference at `/docs`. The UI is

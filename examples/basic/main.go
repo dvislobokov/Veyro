@@ -122,11 +122,12 @@ func main() {
 		return c.User(), nil
 	}).Tags("auth").Summary("Current user").RequireAuthorization()
 
-	app.ServeDocs("/docs", veyro.Info{
-		Title:       "Users API",
-		Version:     "1.0.0",
-		Description: "Example service built with Veyro.",
-	}, scalar.UI)
+	app.OpenAPIConfig().
+		Title("Users API").Version("1.0.0").
+		Description("Example service built with Veyro.").
+		Tag("users", "User accounts").Tag("auth", "Who am I").
+		BearerJWT()
+	app.ServeDocs(scalar.UI)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

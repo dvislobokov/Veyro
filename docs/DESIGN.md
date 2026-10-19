@@ -175,7 +175,11 @@ type Problem struct {
   `app.OpenAPI()` / `app.ServeDocs()`, теги `doc`/`example`/`default`/`enum`/`format`/
   `deprecated`, интерфейс `Enum`. UI — подпакет `scalar` со встроенным через `embed`
   бандлом (gzip, ~1.3 МБ): никаких CDN, шрифтов, прокси и телеметрии. Ядро про UI не
-  знает, принимает `DocsUI`; `nil` — только JSON.
+  знает, принимает `DocsUI`; `nil` — только JSON. Метаданные документа — в
+  `app.OpenAPIConfig()` (дефолты: title «API», version «1.0.0», сервер `/`, путь `/docs`)
+  с хелперами схем безопасности `Basic/Bearer/BearerJWT/APIKey/OIDC/OAuth2*`;
+  аутентификаторы `Bearer/Basic/APIKey` регистрируют свои схемы сами через
+  `SecuritySchemer`, явная конфигурация имеет приоритет.
 - Form и multipart биндинг для тела.
 - SSE/стриминг через `iter.Seq` и `Renderer`.
 - Бенчмарки против ServeMux и chi, затем решение о собственном роутере.

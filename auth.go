@@ -149,6 +149,92 @@ func (b bearer) Authenticate(r *http.Request) (*User, error) {
 
 func (bearer) Challenge() string { return "Bearer" }
 
+type basic struct {
+	realm    string
+	validate func(ctx context.Context, username, password string) (*User, error)
+}
+
+// Basic authenticates requests carrying HTTP Basic credentials. validate
+// checks the username and password and returns the User; its AuthType is
+// set to "Basic" when empty. realm goes into the WWW-Authenticate challenge.
+func Basic(realm string, validate func(ctx context.Context, username, password string) (*User, error)) Authenticator {
+	return basic{realm: realm, validate: validate}
+}
+
+func (b basic) Authenticate(r *http.Request) (*User, error) {
+	username, password, ok := r.BasicAuth()
+	if !ok {
+		return nil, nil
+	}
+	u, err := b.validate(r.Context(), username, password)
+	if err != nil || u == nil {
+		return nil, err
+	}
+	if u.AuthType == "" {
+		u.AuthType = "Basic"
+	}
+	return u, nil
+}
+
+func (b basic) Challenge() string {
+	if b.realm == "" {
+		return "Basic"
+	}
+	return `Basic realm="` + strings.ReplaceAll(b.realm, `"`, `\"`) + `"`
+}
+
+// SecurityScheme implements SecuritySchemer.
+func (basic) SecurityScheme() (string, *SecurityScheme) {
+	return "basic", &SecurityScheme{Type: "http", Scheme: "basic"}
+}
+
+type apiKey struct {
+	name, in string
+	validate func(ctx context.Context, key string) (*User, error)
+}
+
+// APIKey authenticates requests carrying a key in a header, query parameter
+// or cookie (in is "header", "query" or "cookie"). The returned user's
+// AuthType is set to "ApiKey" when empty.
+func APIKey(name, in string, validate func(ctx context.Context, key string) (*User, error)) Authenticator {
+	switch in {
+	case "header", "query", "cookie":
+	default:
+		panic(`veyro: APIKey: in must be "header", "query" or "cookie"`)
+	}
+	return apiKey{name: name, in: in, validate: validate}
+}
+
+func (a apiKey) Authenticate(r *http.Request) (*User, error) {
+	var key string
+	switch a.in {
+	case "header":
+		key = r.Header.Get(a.name)
+	case "query":
+		key = r.URL.Query().Get(a.name)
+	case "cookie":
+		if c, err := r.Cookie(a.name); err == nil {
+			key = c.Value
+		}
+	}
+	if key == "" {
+		return nil, nil
+	}
+	u, err := a.validate(r.Context(), key)
+	if err != nil || u == nil {
+		return nil, err
+	}
+	if u.AuthType == "" {
+		u.AuthType = "ApiKey"
+	}
+	return u, nil
+}
+
+// SecurityScheme implements SecuritySchemer.
+func (a apiKey) SecurityScheme() (string, *SecurityScheme) {
+	return "apiKey", &SecurityScheme{Type: "apiKey", Name: a.name, In: a.in}
+}
+
 type (
 	userKey      struct{}
 	authStateKey struct{}

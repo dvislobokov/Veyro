@@ -65,6 +65,7 @@ type Document struct {
 	OpenAPI    string                           `json:"openapi"`
 	Info       Info                             `json:"info"`
 	Servers    []Server                         `json:"servers,omitzero"`
+	Tags       []Tag                            `json:"tags,omitzero"`
 	Paths      map[string]map[string]*Operation `json:"paths"`
 	Components *Components                      `json:"components,omitzero"`
 }
@@ -120,12 +121,14 @@ type Response struct {
 
 // SecurityScheme is an OpenAPI security scheme object.
 type SecurityScheme struct {
-	Type         string `json:"type"`
-	Description  string `json:"description,omitzero"`
-	Scheme       string `json:"scheme,omitzero"`
-	BearerFormat string `json:"bearerFormat,omitzero"`
-	In           string `json:"in,omitzero"`
-	Name         string `json:"name,omitzero"`
+	Type             string      `json:"type"`
+	Description      string      `json:"description,omitzero"`
+	Scheme           string      `json:"scheme,omitzero"`
+	BearerFormat     string      `json:"bearerFormat,omitzero"`
+	In               string      `json:"in,omitzero"`
+	Name             string      `json:"name,omitzero"`
+	OpenIDConnectURL string      `json:"openIdConnectUrl,omitzero"`
+	Flows            *OAuthFlows `json:"flows,omitzero"`
 }
 
 // Schema is a JSON Schema (2020-12) object as used by OpenAPI 3.1.
@@ -162,8 +165,9 @@ func (bearer) SecurityScheme() (string, *SecurityScheme) {
 	return "bearer", &SecurityScheme{Type: "http", Scheme: "bearer"}
 }
 
-// OpenAPI builds the OpenAPI 3.1 document for the routes registered so far.
-func (a *App) OpenAPI(info Info, servers ...Server) *Document {
+// OpenAPI builds the OpenAPI 3.1 document for the routes registered so far,
+// using App.OpenAPIConfig for info, servers, tags and security schemes.
+func (a *App) OpenAPI() *Document {
 	g := &generator{
 		app:     a,
 		schemas: map[string]*Schema{},
@@ -171,23 +175,18 @@ func (a *App) OpenAPI(info Info, servers ...Server) *Document {
 		taken:   map[string]reflect.Type{},
 		usage:   map[reflect.Type]int{},
 	}
-	return g.build(info, servers)
+	return g.build()
 }
 
-// DocsUI builds the handler for an interactive API reference. It receives
-// the document title, the URL of the OpenAPI JSON and the base path it is
-// mounted on, and must serve the page at base and any assets below it.
-// The scalar sub-package provides one that embeds Scalar with no external
-// requests.
-type DocsUI func(title, specURL, base string) http.Handler
-
 // ServeDocs serves the OpenAPI document at <path>/openapi.json and, when ui
-// is not nil, an interactive reference at <path>. The document is generated
-// on first request, so routes registered later are included.
+// is not nil, an interactive reference at <path>, where path comes from
+// OpenAPIConfig (default /docs). The document is generated on first request,
+// so routes registered later are included.
 //
-//	app.ServeDocs("/docs", veyro.Info{Title: "Users API", Version: "1.0.0"}, scalar.UI)
-func (a *App) ServeDocs(path string, info Info, ui DocsUI, servers ...Server) *App {
-	path = strings.TrimSuffix(path, "/")
+//	app.ServeDocs(scalar.UI)
+func (a *App) ServeDocs(ui DocsUI) *App {
+	cfg := a.OpenAPIConfig()
+	path := cfg.path
 	var (
 		once sync.Once
 		spec []byte
@@ -195,7 +194,7 @@ func (a *App) ServeDocs(path string, info Info, ui DocsUI, servers ...Server) *A
 	)
 	specURL := path + "/openapi.json"
 	a.Raw(http.MethodGet, specURL, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		once.Do(func() { spec, err = json.Marshal(a.OpenAPI(info, servers...), json.Deterministic(true)) })
+		once.Do(func() { spec, err = json.Marshal(a.OpenAPI(), json.Deterministic(true)) })
 		if err != nil {
 			a.writeError(w, r, err)
 			return
@@ -206,7 +205,7 @@ func (a *App) ServeDocs(path string, info Info, ui DocsUI, servers ...Server) *A
 	if ui == nil {
 		return a
 	}
-	h := ui(info.Title, specURL, path)
+	h := ui(cfg.info.Title, specURL, path)
 	a.Raw(http.MethodGet, path, h).Hide()
 	a.Raw(http.MethodGet, path+"/{asset...}", h).Hide()
 	return a
@@ -218,11 +217,13 @@ const (
 )
 
 type generator struct {
-	app     *App
-	schemas map[string]*Schema
-	names   map[reflect.Type]string
-	taken   map[string]reflect.Type
-	usage   map[reflect.Type]int
+	app        *App
+	schemas    map[string]*Schema
+	names      map[reflect.Type]string
+	taken      map[string]reflect.Type
+	usage      map[reflect.Type]int
+	secNames   []string
+	secSchemes map[string]*SecurityScheme
 }
 
 var (
@@ -235,8 +236,10 @@ var (
 	jsonMarshalerTo = reflect.TypeFor[json.MarshalerTo]()
 )
 
-func (g *generator) build(info Info, servers []Server) *Document {
-	doc := &Document{OpenAPI: "3.1.0", Info: info, Servers: servers, Paths: map[string]map[string]*Operation{}}
+func (g *generator) build() *Document {
+	cfg := g.app.OpenAPIConfig()
+	doc := &Document{OpenAPI: "3.1.0", Info: cfg.info, Servers: cfg.servers, Tags: cfg.tags, Paths: map[string]map[string]*Operation{}}
+	g.secNames, g.secSchemes = g.app.securitySchemes()
 
 	// Pass 1: how each type is used decides which fields are required.
 	for _, rt := range g.app.routes {
@@ -265,14 +268,8 @@ func (g *generator) build(info Info, servers []Server) *Document {
 	}
 
 	comps := &Components{Schemas: g.schemas}
-	for _, s := range g.app.schemes {
-		if ss, ok := s.(SecuritySchemer); ok {
-			name, scheme := ss.SecurityScheme()
-			if comps.SecuritySchemes == nil {
-				comps.SecuritySchemes = map[string]*SecurityScheme{}
-			}
-			comps.SecuritySchemes[name] = scheme
-		}
+	if len(g.secSchemes) > 0 {
+		comps.SecuritySchemes = g.secSchemes
 	}
 	doc.Components = comps
 	return doc
@@ -370,9 +367,10 @@ func (g *generator) operation(rt *Route, path, method string) *Operation {
 	if rt.secured() {
 		op.Responses["401"] = g.problemResponse(http.StatusUnauthorized)
 		op.Responses["403"] = g.problemResponse(http.StatusForbidden)
-		for _, s := range g.app.schemes {
-			if ss, ok := s.(SecuritySchemer); ok {
-				name, _ := ss.SecurityScheme()
+		if rt.meta.security != nil {
+			op.Security = rt.meta.security
+		} else {
+			for _, name := range g.secNames {
 				op.Security = append(op.Security, map[string][]string{name: {}})
 			}
 		}

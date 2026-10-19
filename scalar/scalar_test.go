@@ -16,7 +16,8 @@ import (
 func TestNoExternalRequests(t *testing.T) {
 	app := veyro.New()
 	app.Get("/ping", func(c *veyro.Context, _ veyro.None) (string, error) { return "pong", nil })
-	app.ServeDocs("/docs", veyro.Info{Title: "T <api>", Version: "1"}, scalar.UI)
+	app.OpenAPIConfig().Title("T <api>").Version("1")
+	app.ServeDocs(scalar.UI)
 
 	get := func(path string, hdr ...string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)

@@ -2,7 +2,9 @@ package veyro_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,7 +76,8 @@ func TestOpenAPIDocument(t *testing.T) {
 	})
 	acc.Get("/stats", func(c *veyro.Context, _ veyro.None) (Stats, error) { return Stats{}, nil })
 	app.Get("/hidden", func(c *veyro.Context, _ veyro.None) (string, error) { return "", nil }).Hide()
-	app.ServeDocs("/docs", veyro.Info{Title: "Accounts API", Version: "1.0.0"}, nil)
+	app.OpenAPIConfig().Title("Accounts API").Version("1.0.0")
+	app.ServeDocs(nil)
 
 	// Served document.
 	rec := httptest.NewRecorder()
@@ -319,3 +322,127 @@ func keys(m map[string]any) []string {
 }
 
 var _ = context.Background
+
+func TestOpenAPIConfigDefaultsAndSecurityHelpers(t *testing.T) {
+	app := newApp(t)
+	doc := app.OpenAPI()
+	if doc.Info.Title != "API" || doc.Info.Version != "1.0.0" || len(doc.Servers) != 1 || doc.Servers[0].URL != "/" {
+		t.Errorf("defaults: %+v %+v", doc.Info, doc.Servers)
+	}
+
+	cfg := app.OpenAPIConfig().
+		Title("Shop").Version("2.0.0").Description("desc").
+		Contact("Team", "https://example.com", "team@example.com").
+		License("MIT", "https://opensource.org/license/mit").
+		Server("https://api.example.com", "production").
+		Server("http://localhost:8080", "local").
+		Tag("orders", "Order management").
+		Basic().BearerJWT().APIKey("X-Api-Key", "header").
+		OIDC("https://id.example.com/.well-known/openid-configuration").
+		OAuth2AuthorizationCode("https://id.example.com/authorize", "https://id.example.com/token",
+			map[string]string{"read:orders": "Read orders"}).
+		Path("/api-docs/")
+
+	app.Group("/orders").Tags("orders").
+		Get("", func(c *veyro.Context, _ veyro.None) ([]string, error) { return nil, nil }).
+		Security("oauth2", "read:orders").Security("apiKey")
+	app.Get("/me", func(c *veyro.Context, _ veyro.None) (string, error) { return "", nil }).RequireAuthorization()
+	app.ServeDocs(nil)
+
+	doc = app.OpenAPI()
+	if doc.Info.Title != "Shop" || doc.Info.Contact.Email != "team@example.com" || doc.Info.License.Name != "MIT" {
+		t.Errorf("info: %+v", doc.Info)
+	}
+	if len(doc.Servers) != 2 || doc.Servers[0].URL != "https://api.example.com" || doc.Servers[1].Description != "local" {
+		t.Errorf("Server() must replace the default and append: %+v", doc.Servers)
+	}
+	if len(doc.Tags) != 1 || doc.Tags[0].Description != "Order management" {
+		t.Errorf("tags: %+v", doc.Tags)
+	}
+	ss := doc.Components.SecuritySchemes
+	want := map[string]string{"basic": "http", "bearer": "http", "apiKey": "apiKey", "oidc": "openIdConnect", "oauth2": "oauth2"}
+	for name, typ := range want {
+		if ss[name] == nil || ss[name].Type != typ {
+			t.Errorf("scheme %s: %+v", name, ss[name])
+		}
+	}
+	if ss["bearer"].BearerFormat != "JWT" || ss["apiKey"].Name != "X-Api-Key" || ss["apiKey"].In != "header" ||
+		!strings.HasSuffix(ss["oidc"].OpenIDConnectURL, "openid-configuration") ||
+		ss["oauth2"].Flows.AuthorizationCode.Scopes["read:orders"] != "Read orders" {
+		t.Errorf("scheme details: %+v %+v %+v %+v", ss["bearer"], ss["apiKey"], ss["oidc"], ss["oauth2"].Flows.AuthorizationCode)
+	}
+
+	// Route.Security overrides the default "any scheme".
+	orders := doc.Paths["/orders"]["get"]
+	if len(orders.Security) != 2 || orders.Security[0]["oauth2"][0] != "read:orders" || orders.Security[1]["apiKey"] == nil {
+		t.Errorf("route security: %v", orders.Security)
+	}
+	if orders.Responses["401"] == nil {
+		t.Error("Security() implies 401 docs")
+	}
+	// Default: every registered scheme, in registration order.
+	me := doc.Paths["/me"]["get"]
+	if len(me.Security) != 5 || me.Security[0]["basic"] == nil || me.Security[4]["oauth2"] == nil {
+		t.Errorf("default security: %v", me.Security)
+	}
+
+	// Path() moved the docs.
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api-docs/openapi.json", nil))
+	if rec.Code != 200 {
+		t.Errorf("custom docs path: %d", rec.Code)
+	}
+	_ = cfg
+}
+
+func TestBasicAndAPIKeyAuthenticators(t *testing.T) {
+	app := newApp(t)
+	app.UseAuthentication(
+		veyro.Basic("shop", func(ctx context.Context, user, pass string) (*veyro.User, error) {
+			if user == "ann" && pass == "pw" {
+				return veyro.NewUser("", "ann"), nil
+			}
+			return nil, errors.New("bad credentials")
+		}),
+		veyro.APIKey("X-Api-Key", "header", func(ctx context.Context, key string) (*veyro.User, error) {
+			if key == "k1" {
+				return veyro.NewUser("", "svc").AddClaim(veyro.ClaimRole, "service"), nil
+			}
+			return nil, errors.New("unknown key")
+		}),
+	)
+	app.Get("/me", func(c *veyro.Context, _ veyro.None) (map[string]string, error) {
+		return map[string]string{"name": c.User().Name, "type": c.User().AuthType}, nil
+	}).RequireAuthorization()
+
+	resp, out := do(t, app, http.MethodGet, "/me", "")
+	if resp.StatusCode != 401 || len(resp.Header.Values("WWW-Authenticate")) != 1 || resp.Header.Get("WWW-Authenticate") != `Basic realm="shop"` {
+		t.Errorf("anonymous: %d %v %v", resp.StatusCode, resp.Header, out)
+	}
+	resp, out = do(t, app, http.MethodGet, "/me", "", "Authorization", "Basic "+basicToken("ann", "pw"))
+	if resp.StatusCode != 200 || out["name"] != "ann" || out["type"] != "Basic" {
+		t.Errorf("basic ok: %d %v", resp.StatusCode, out)
+	}
+	resp, out = do(t, app, http.MethodGet, "/me", "", "Authorization", "Basic "+basicToken("ann", "nope"))
+	if resp.StatusCode != 401 || out["detail"] != "bad credentials" {
+		t.Errorf("basic bad: %d %v", resp.StatusCode, out)
+	}
+	resp, out = do(t, app, http.MethodGet, "/me", "", "X-Api-Key", "k1")
+	if resp.StatusCode != 200 || out["name"] != "svc" || out["type"] != "ApiKey" {
+		t.Errorf("api key: %d %v", resp.StatusCode, out)
+	}
+
+	ss := app.OpenAPI().Components.SecuritySchemes
+	if ss["basic"] == nil || ss["apiKey"] == nil || ss["apiKey"].Name != "X-Api-Key" {
+		t.Errorf("schemes from authenticators: %+v", ss)
+	}
+	// Explicit config wins over the authenticator's description.
+	app.OpenAPIConfig().SecurityScheme("basic", &veyro.SecurityScheme{Type: "http", Scheme: "basic", Description: "Staff accounts"})
+	if app.OpenAPI().Components.SecuritySchemes["basic"].Description != "Staff accounts" {
+		t.Error("explicit scheme must override")
+	}
+}
+
+func basicToken(user, pass string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+}
