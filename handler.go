@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
+
+	"github.com/dvislobokov/srog"
 )
 
 // Handler is the shape of every veyro handler. *Context implements
@@ -83,7 +85,7 @@ func (a *App) render(c *Context, out any, outNone bool) {
 	w, r := c.w, c.Request
 	if rd, ok := out.(Renderer); ok {
 		if err := rd.Render(w, r); err != nil {
-			a.cfg.logger.ErrorContext(r.Context(), "veyro: render failed", "err", err)
+			a.cfg.logger.Error(err, "Render failed for {Method} {Path} ({RequestId})", r.Method, r.URL.Path, TraceID(r.Context()))
 		}
 		return
 	}
@@ -133,14 +135,25 @@ func (a *App) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &mbe):
 		p = NewProblem(http.StatusRequestEntityTooLarge, "")
 	default:
-		a.cfg.logger.ErrorContext(r.Context(), "veyro: unhandled error",
-			"err", err, "method", r.Method, "path", r.URL.Path, "traceId", TraceID(r.Context()))
+		a.cfg.logger.Error(err, "Unhandled error in {Method} {Path} ({RequestId})",
+			r.Method, r.URL.Path, TraceID(r.Context()))
 		p = NewProblem(http.StatusInternalServerError, "")
 		if a.cfg.exposeErrors {
 			p.Detail = err.Error()
 		}
 	}
 	a.writeProblem(w, r, p)
+}
+
+// WriteProblem writes p as an application/problem+json response, filling
+// TraceID from the request. Middleware that answers on its own (rate
+// limits, timeouts) uses it so every error has the same shape.
+func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
+	if a := appFrom(r.Context()); a != nil {
+		a.writeProblem(w, r, p)
+		return
+	}
+	(&App{cfg: config{logger: srog.Default()}}).writeProblem(w, r, p)
 }
 
 func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
@@ -154,7 +167,7 @@ func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 	buf := getBuffer()
 	defer putBuffer(buf)
 	if err := json.MarshalWrite(buf, &q, json.Deterministic(true)); err != nil {
-		a.cfg.logger.ErrorContext(r.Context(), "veyro: cannot encode problem", "err", err)
+		a.cfg.logger.Error(err, "Cannot encode problem response ({RequestId})", TraceID(r.Context()))
 		http.Error(w, http.StatusText(q.Status), q.Status)
 		return
 	}

@@ -7,7 +7,7 @@
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/doc/go1.27)
 [![Go Reference](https://pkg.go.dev/badge/github.com/dvislobokov/veyro.svg)](https://pkg.go.dev/github.com/dvislobokov/veyro)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Zero dependencies](https://img.shields.io/badge/dependencies-0-success)](go.mod)
+[![Dependencies](https://img.shields.io/badge/dependencies-srog-success)](go.mod)
 
 </div>
 
@@ -55,7 +55,7 @@ response controls live on `*veyro.Context`, which is itself a `context.Context`.
 | Path, query, headers and body in one struct | ✅ | ❌ | partially | ❌ |
 | Problem details (RFC 9457) everywhere | ✅ | ❌ | ✅ | ❌ |
 | Works with any `net/http` middleware | ✅ | ❌ | ✅ | ✅ |
-| Dependencies | 0 | many | some | 0 |
+| Dependencies | 1 (logging) | many | some | 0 |
 
 ## Install
 
@@ -230,7 +230,9 @@ That serves `/docs/openapi.json` (OpenAPI 3.1) and an interactive
 embedded in your binary and makes **no external requests**: no CDN, no web
 fonts, no request proxy, no telemetry. It works on an air-gapped network.
 Pass `nil` instead of `scalar.UI` to serve only the JSON, or implement
-`veyro.DocsUI` to plug in another viewer. Everything in the document comes
+`veyro.DocsUI` to plug in another viewer. `ServeDocs` returns the docs
+router group, so `app.ServeDocs(scalar.UI).RequireRole("admin")` keeps
+the reference private. Everything in the document comes
 from the routes you already registered: `In`
 types become parameters and request bodies, `Out` types become responses,
 `Require*` adds security and `401`/`403`, and errors are documented as
@@ -268,17 +270,47 @@ appear, including inside slices. `uuid.UUID`, `time.Time`, `time.Duration`,
 Pointers are nullable; fields are required when `validate:"required"` says
 so, and in output-only types every non-nullable field is required.
 
-## Groups and middleware
+## Logging
 
-Middleware is plain `func(http.Handler) http.Handler`, so chi, gorilla and
-otelhttp middleware work unchanged.
+Veyro logs through [srog](https://github.com/dvislobokov/srog), a
+Serilog-style structured logger. `c.Logger()` is the App logger enriched
+with the request id, and `srog.Ctx(ctx)` picks the id up from any context
+derived from a request:
 
 ```go
-app := veyro.New(veyro.WithLogger(logger))
-app.Use(veyro.Logger(logger))          // every request, 404s included
+app := veyro.New(veyro.WithLogger(srog.NewDevelopment()))
 
-api := app.Group("/api/v1", rateLimit)
-api.Get("/me", me).Use(cache)          // per-route middleware
+func get(c *veyro.Context, in GetUser) (User, error) {
+    c.Logger().Information("Loading {UserId}", in.ID)   // RequestId attached
+    return repo.Get(c, in.ID)                            // srog.Ctx(ctx) inside works too
+}
+```
+
+## Middleware
+
+The `middleware` package ships the usual set, all plain
+`func(http.Handler) http.Handler` and all answering with problem details:
+
+| | |
+|---|---|
+| `Logger(...)` | one srog line per request, level by status, skip lists |
+| `CORS(opts)` | origins with wildcards, preflight, credentials, max-age |
+| `Timeout(d)` | deadline on the context, `504` problem if exceeded |
+| `Gzip(opts)` | by content type and size, streaming-safe |
+| `RateLimit(opts)` | token bucket per client, `429` with `Retry-After` |
+| `RealIP(proxies...)` | trusts `X-Forwarded-For` only from listed proxies |
+| `SecureHeaders(opts)` | nosniff, frame options, referrer policy, HSTS, CSP |
+
+Request ids and panic recovery are built into the App. Anything written
+for chi, gorilla or otelhttp works unchanged.
+
+## Groups
+
+```go
+app.Use(middleware.Logger(), middleware.CORS(cors))   // every request, 404s included
+
+api := app.Group("/api/v1", middleware.RateLimit(limits))
+api.Get("/me", me).Use(cache)                         // per-route middleware
 api.Raw("GET", "/metrics", promhttp.Handler())
 ```
 

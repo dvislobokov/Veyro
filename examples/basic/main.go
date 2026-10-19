@@ -5,20 +5,22 @@
 //	curl localhost:8080/users/<id>?expand=profile
 //	curl -X POST localhost:8080/users -H 'Authorization: Bearer ann' -H 'Content-Type: application/json' -d '{"name":"A"}'   # validation problem
 //	curl localhost:8080/me                                  # 401 with WWW-Authenticate: Bearer
-//	open http://localhost:8080/docs                         # interactive API reference
+//	open http://localhost:8080/docs                         # API reference (admin token required)
 //	curl -X DELETE localhost:8080/users/<id> -H 'Authorization: Bearer ann'   # 403
 package main
 
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
+	"time"
 	"uuid"
 
+	"github.com/dvislobokov/srog"
 	"github.com/dvislobokov/veyro"
+	"github.com/dvislobokov/veyro/middleware"
 	"github.com/dvislobokov/veyro/scalar"
 )
 
@@ -108,9 +110,22 @@ func lookupToken(ctx context.Context, token string) (*veyro.User, error) {
 func main() {
 	db := &store{users: map[uuid.UUID]User{}}
 
-	app := veyro.New()
-	app.Use(veyro.Logger(slog.Default()))
+	log := srog.NewDevelopment()
+	defer log.Close()
+
+	app := veyro.New(veyro.WithLogger(log))
+	app.Use(
+		middleware.SecureHeaders(middleware.SecureHeadersOptions{}),
+		middleware.Logger(middleware.SkipPaths("/health")),
+		middleware.CORS(middleware.CORSAllowAll()),
+		middleware.Gzip(middleware.GzipOptions{}),
+		middleware.RateLimit(middleware.RateLimitOptions{Rate: 50, Burst: 100}),
+		middleware.Timeout(10*time.Second),
+	)
 	app.UseAuthentication(veyro.Bearer(lookupToken))
+	app.Get("/health", func(c *veyro.Context, _ veyro.None) (map[string]string, error) {
+		return map[string]string{"status": "ok"}, nil
+	}).Hide()
 
 	users := app.Group("/users").Tags("users").RequireAuthorization()
 	users.Post("", db.create).Summary("Create a user").Success(201)
@@ -118,22 +133,23 @@ func main() {
 	users.Get("/{id}", db.get).Summary("Get a user").Errors(404).AllowAnonymous()
 	users.Delete("/{id}", db.remove).Summary("Delete a user").RequireRole("admin")
 
-	app.Get("/me", func(c *veyro.Context, _ veyro.None) (*veyro.User, error) {
-		return c.User(), nil
-	}).Tags("auth").Summary("Current user").RequireAuthorization()
-
 	app.OpenAPIConfig().
 		Title("Users API").Version("1.0.0").
 		Description("Example service built with Veyro.").
 		Tag("users", "User accounts").Tag("auth", "Who am I").
 		BearerJWT()
-	app.ServeDocs(scalar.UI)
+	app.ServeDocs(scalar.UI).RequireRole("admin") // docs for admins only
+
+	app.Get("/me", func(c *veyro.Context, _ veyro.None) (*veyro.User, error) {
+		c.Logger().Information("Whoami for {User}", c.User().Name)
+		return c.User(), nil
+	}).Tags("auth").Summary("Current user").RequireAuthorization()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	slog.Info("listening", "addr", ":8080")
+	log.Information("Listening on {Addr}", ":8080")
 	if err := app.Run(ctx, ":8080"); err != nil {
-		slog.Error("server stopped", "err", err)
+		log.Error(err, "Server stopped")
 		os.Exit(1)
 	}
 }

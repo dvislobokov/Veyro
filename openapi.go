@@ -183,17 +183,21 @@ func (a *App) OpenAPI() *Document {
 // OpenAPIConfig (default /docs). The document is generated on first request,
 // so routes registered later are included.
 //
-//	app.ServeDocs(scalar.UI)
-func (a *App) ServeDocs(ui DocsUI) *App {
+// It returns the router group holding the docs routes, so they can be
+// protected like any other routes:
+//
+//	app.ServeDocs(scalar.UI).RequireRole("admin")
+func (a *App) ServeDocs(ui DocsUI) *Router {
 	cfg := a.OpenAPIConfig()
 	path := cfg.path
+	docs := a.Group(path)
 	var (
 		once sync.Once
 		spec *Static
 		err  error
 	)
 	specURL := path + "/openapi.json"
-	a.Raw(http.MethodGet, specURL, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	docs.Raw(http.MethodGet, "/openapi.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Generated once, on the first request, so routes registered after
 		// ServeDocs are included; then served from memory with ETag/304 and
 		// a precompressed gzip body. "no-cache" means "revalidate", so a
@@ -211,12 +215,12 @@ func (a *App) ServeDocs(ui DocsUI) *App {
 		spec.ServeHTTP(w, r)
 	})).Hide()
 	if ui == nil {
-		return a
+		return docs
 	}
 	h := ui(cfg.info.Title, specURL, path)
-	a.Raw(http.MethodGet, path, h).Hide()
-	a.Raw(http.MethodGet, path+"/{asset...}", h).Hide()
-	return a
+	docs.Raw(http.MethodGet, "", h).Hide()
+	docs.Raw(http.MethodGet, "/{asset...}", h).Hide()
+	return docs
 }
 
 const (

@@ -14,7 +14,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 	"uuid"
+
+	"github.com/dvislobokov/srog"
 )
 
 // Middleware wraps an http.Handler. Any middleware written for net/http works.
@@ -31,15 +33,16 @@ type Middleware func(http.Handler) http.Handler
 type Option func(*config)
 
 type config struct {
-	logger       *slog.Logger
+	logger       *srog.Logger
 	jsonOpts     []json.Options
 	exposeErrors bool
 	maxBody      int64
 	requestID    func(*http.Request) string
 }
 
-// WithLogger sets the logger used for unhandled errors and panics.
-func WithLogger(l *slog.Logger) Option { return func(c *config) { c.logger = l } }
+// WithLogger sets the logger used for unhandled errors, panics and
+// Context.Logger. Default is srog.Default().
+func WithLogger(l *srog.Logger) Option { return func(c *config) { c.logger = l } }
 
 // WithJSONOptions sets encoding/json/v2 options used for request and response bodies.
 func WithJSONOptions(opts ...json.Options) Option {
@@ -76,7 +79,7 @@ func New(opts ...Option) *App {
 	app := &App{
 		tree: newTree(),
 		cfg: config{
-			logger:    slog.Default(),
+			logger:    srog.Default(),
 			maxBody:   4 << 20,
 			requestID: defaultRequestID,
 		},
@@ -85,7 +88,33 @@ func New(opts ...Option) *App {
 		o(&app.cfg)
 	}
 	app.Router = Router{app: app}
+	registerLogFields()
 	return app
+}
+
+var logFieldsOnce sync.Once
+
+// registerLogFields teaches srog.Ctx to attach the request id, so
+// srog.Ctx(ctx).Information(...) anywhere below a handler carries RequestId
+// without per-request work.
+func registerLogFields() {
+	logFieldsOnce.Do(func() {
+		srog.AddContextField(func(ctx context.Context) []srog.Field {
+			if id := TraceID(ctx); id != "" {
+				return []srog.Field{{Name: "RequestId", Value: id}}
+			}
+			return nil
+		})
+	})
+}
+
+// LoggerFrom returns the App logger for a request context, enriched with
+// RequestId, or srog.Default() outside an App.
+func LoggerFrom(ctx context.Context) *srog.Logger {
+	if i := infoFrom(ctx); i != nil {
+		return i.app.cfg.logger.ForContext("RequestId", i.traceID)
+	}
+	return srog.Default()
 }
 
 func defaultRequestID(r *http.Request) string {
@@ -439,8 +468,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if rec == http.ErrAbortHandler {
 				panic(rec)
 			}
-			a.cfg.logger.ErrorContext(ctx, "veyro: panic",
-				"panic", rec, "method", r.Method, "path", r.URL.Path, "traceId", id)
+			a.cfg.logger.Error(fmt.Errorf("panic: %v", rec),
+				"Panic while handling {Method} {Path} ({RequestId})", r.Method, r.URL.Path, id)
 			a.writeError(w, r, errors.New("panic recovered"))
 		}
 	}()

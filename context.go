@@ -2,8 +2,9 @@ package veyro
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
+
+	"github.com/dvislobokov/srog"
 )
 
 type ctxKey struct{}
@@ -78,9 +79,10 @@ func (c *Context) SetCookie(cookie *http.Cookie) { http.SetCookie(c.w, cookie) }
 // TraceID returns the request id, also sent as X-Request-Id and in problems.
 func (c *Context) TraceID() string { return TraceID(c.Context) }
 
-// Logger returns the application logger with the trace id attached.
-func (c *Context) Logger() *slog.Logger {
-	return c.app.cfg.logger.With("traceId", c.TraceID())
+// Logger returns the application logger enriched with RequestId.
+// srog.Ctx(c) gives the same enrichment on top of the process default.
+func (c *Context) Logger() *srog.Logger {
+	return c.app.cfg.logger.ForContext("RequestId", c.TraceID())
 }
 
 // User returns the authenticated user, or an anonymous user when no

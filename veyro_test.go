@@ -5,7 +5,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/dvislobokov/srog"
 	"github.com/dvislobokov/veyro"
 )
 
@@ -44,7 +44,11 @@ type echo struct {
 
 func newApp(t *testing.T) *veyro.App {
 	t.Helper()
-	return veyro.New(veyro.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))), veyro.ExposeErrors(true))
+	return veyro.New(veyro.WithLogger(quietLogger()), veyro.ExposeErrors(true))
+}
+
+func quietLogger() *srog.Logger {
+	return srog.MustNew(srog.WithWriter(io.Discard))
 }
 
 func do(t *testing.T, h http.Handler, method, target, body string, hdr ...string) (*http.Response, map[string]any) {
@@ -257,7 +261,7 @@ func TestValidatorInterfaceMergesErrors(t *testing.T) {
 }
 
 func TestErrorsFromHandler(t *testing.T) {
-	app := veyro.New(veyro.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	app := veyro.New(veyro.WithLogger(quietLogger()))
 	app.Get("/p", func(c *veyro.Context, _ veyro.None) (veyro.None, error) {
 		return veyro.None{}, veyro.NotFound("no such thing").With("resource", "thing")
 	})
