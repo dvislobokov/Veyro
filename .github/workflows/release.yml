@@ -1,0 +1,44 @@
+name: Release
+
+# Tags a release and publishes it on GitHub. Run it from the Actions tab
+# (or `gh workflow run release.yml -f version=v1.2.3`); the tag is created
+# on the commit the workflow runs against, normally the head of main.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+      - name: Validate version
+        run: |
+          [[ "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "bad version"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/${{ inputs.version }}" >/dev/null; then echo "tag exists"; exit 1; fi
+      - name: Test
+        run: go vet ./... && go test -race ./...
+      - name: Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ inputs.version }}" -m "Veyro ${{ inputs.version }}"
+          git push origin "refs/tags/${{ inputs.version }}"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ inputs.version }}" --title "Veyro ${{ inputs.version }}" --generate-notes
+      - name: Warm the module proxy
+        run: GOPROXY=https://proxy.golang.org GONOSUMDB=github.com/dvislobokov/veyro go list -m "github.com/dvislobokov/veyro@${{ inputs.version }}" || true
