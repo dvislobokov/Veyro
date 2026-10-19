@@ -1,6 +1,6 @@
 # Veyro — дизайн фреймворка
 
-Статус: черновик для обсуждения. Проверено на `go1.27.0 linux/amd64`.
+Статус: ядро реализовано (см. корень репозитория). Проверено на `go1.27.0 linux/amd64`.
 
 ## Идея в одном абзаце
 
@@ -84,12 +84,18 @@ func (g *Group) Raw(pattern string, h http.Handler)                             
 
 ### Биндинг `In`
 
+Одна структура описывает весь запрос, как `[AsParameters]` в ASP.NET Core.
+Отдельного поля для тела нет: всё, что не помечено `path`/`query`/`header`/`cookie`,
+декодируется из JSON-тела.
+
 ```go
-type GetUser struct {
+type UpdateUser struct {
     ID     uuid.UUID `path:"id"`
     Expand []string  `query:"expand"`
     Trace  string    `header:"X-Trace-Id"`
-    Body   Patch     `body:""`      // или весь struct — body, если тегов path/query нет
+
+    Name   string    `json:"name" validate:"required,minlen=2"` // из тела
+    Email  string    `json:"email" validate:"email"`             // из тела
 }
 ```
 
@@ -98,17 +104,24 @@ type GetUser struct {
 
 ### Ошибки
 
+Формат ответа — RFC 9457 `application/problem+json` в точности как
+`ProblemDetails`/`ValidationProblemDetails` в ASP.NET Core: `type` указывает на
+секцию RFC 9110, `title` — стандартная фраза, ошибки валидации лежат в
+`errors: {"field": ["message"]}`, ошибки разбора JSON — под ключом `$`,
+везде есть `traceId`.
+
 ```go
-type Error struct {
-    Status int            `json:"-"`
-    Code   string         `json:"code"`
-    Msg    string         `json:"message"`
-    Meta   map[string]any `json:"meta,omitzero"`
+type Problem struct {
+    Type, Title, Detail, Instance string
+    Status  int
+    Errors  ValidationErrors   // map[string][]string
+    TraceID string
+    Extensions map[string]any  `json:",embed"`
 }
 ```
 
-Хендлер возвращает `error`; `errors.As` → `*veyro.Error` даёт статус; всё остальное —
-500 с логированием. Ответ — RFC 9457 `application/problem+json`.
+`*Problem` реализует `error`: хендлер возвращает `veyro.NotFound("...")`, а всё
+незнакомое превращается в 500 без деталей и логируется через `slog`.
 
 ### Middleware
 
@@ -131,12 +144,20 @@ type Error struct {
 - Зависимости вне stdlib в ядре. Валидация, OpenAPI — отдельные пакеты.
 - Поддержка Go < 1.27: весь смысл фреймворка в generic-методах.
 
-## Открытые вопросы
+## Принятые решения
 
-1. Роутер: `ServeMux` внутри (быстрый старт) или сразу своё дерево?
-2. Биндинг path/query: struct-теги (`path:"id"`) или отдельные generic-экстракторы
-   (`veyro.Path[uuid.UUID]`)? Теги привычнее, экстракторы — безопаснее по типам.
-3. Нужен ли OpenAPI в первой версии?
+1. Роутер — `ServeMux` внутри. Известная цена: `ServeHTTP` делает два поиска
+   маршрута (один для перехвата 404/405, второй в `ServeMux.ServeHTTP`, который
+   заполняет path values). Уйдёт при переходе на своё дерево.
+2. Биндинг — struct-теги в одной структуре, по образцу ASP.NET Core.
+3. OpenAPI — следующий этап; все типы `In`/`Out` уже известны при регистрации.
+
+## Следующие шаги
+
+- OpenAPI 3.1 из типов `In`/`Out` и правил `validate`.
+- Form и multipart биндинг для тела.
+- SSE/стриминг через `iter.Seq` и `Renderer`.
+- Бенчмарки против ServeMux и chi, затем решение о собственном роутере.
 
 ## Проверенный прототип
 
