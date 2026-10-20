@@ -193,6 +193,16 @@ type Problem struct {
 `/probe/healthy`. Версии OTel пришпилены к набору, совместимому с `srogotel`
 (`otel` v1.44, `otel/log` v0.20): `otel/log` v1.47 ломает его API.
 
+### JWT
+
+Подпакет `jwt` на stdlib `crypto`: проверка подписи RS/PS/ES/EdDSA (HS только явно),
+claims `exp`/`nbf`/`iat`/`iss`/`aud` с leeway, ключи из `StaticKeys`, PEM или `Remote`
+(JWKS и OIDC discovery) с кэшем, фоновым обновлением и однократным refresh по
+неизвестному `kid` с rate-limit. Для service mesh: `Issuer` в токене и адрес
+получения ключей независимы, `Rewrite` для `jwks_uri` из discovery, `HostHeader`,
+`TLS` (SNI, mTLS), свои заголовки. Claims маппятся в `User`: роли Keycloak
+(`realm_access`, `resource_access.<client>`), группы, scope, остальное плоско.
+
 ## Следующие шаги
 
 - ~~OpenAPI 3.1 из типов `In`/`Out` и правил `validate`.~~ Сделано: `openapi.go`,

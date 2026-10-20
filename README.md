@@ -189,7 +189,8 @@ and write the response yourself: redirects, files, server-sent events, HTML.
 `veyro.User` is a `ClaimsPrincipal`: a name, the scheme that authenticated
 it and a list of claims, with `IsAuthenticated`, `ID`, `IsInRole`, `HasClaim`,
 `FindFirst` and friends. Built-in schemes: `Bearer`, `Basic` and `APIKey`
-(header, query or cookie); anything else implements `Authenticator`.
+(header, query or cookie) and `jwt.New` below; anything else implements
+`Authenticator`.
 
 ```go
 func verifyToken(ctx context.Context, token string) (*veyro.User, error) {
@@ -211,6 +212,45 @@ app.Get("/tenant", tenant).RequireClaim("tenant", "acme")
 admin := app.Group("/admin").RequireRole("admin")
 admin.Get("/health", health).AllowAnonymous()  // opt out, like [AllowAnonymous]
 ```
+
+### JWT
+
+The `jwt` package verifies tokens with the standard library only (RS, PS,
+ES, EdDSA and, opt-in, HS algorithms) and maps claims to users:
+
+```go
+import "github.com/dvislobokov/veyro/jwt"
+
+app.UseAuthentication(jwt.New(jwt.Config{
+    Issuer:   "https://auth.example.com/realms/shop",   // "iss" exactly as printed in tokens
+    Audience: []string{"orders-api"},
+    Keys: jwt.NewRemote(jwt.Remote{
+        // Inside a service mesh the provider is reached at an internal
+        // address while tokens carry the public issuer; discovery runs
+        // there and the advertised jwks_uri is rewritten to the mesh host.
+        DiscoveryURL: "http://keycloak.auth.svc:8080/realms/shop/.well-known/openid-configuration",
+        Rewrite:      func(u string) string { return strings.Replace(u, "https://auth.example.com", "http://keycloak.auth.svc:8080", 1) },
+        HostHeader:   "auth.example.com",                 // virtual-host routing at the ingress
+        Headers:      map[string]string{"X-Mesh-Token": os.Getenv("MESH_TOKEN")},
+        TLS:          &tls.Config{ServerName: "auth.example.com", RootCAs: meshCA},
+    }),
+    ClientRoleClaims: []string{"orders-api"},            // Keycloak resource_access.<client>.roles
+}))
+```
+
+Keys are cached, refreshed hourly in the background and re-fetched once
+when a token names an unknown `kid` (rate-limited, so rotations are picked
+up but unknown kids cannot hammer the provider). `JWKSURL` alone works
+without discovery and overrides the `jwks_uri` from it. Static keys
+(`jwt.StaticKeys`, `jwt.ParsePEM`, `jwt.HMACKey`) cover the rest.
+
+Claims are validated for `exp`, `nbf`, `iat` with leeway, `iss`, `aud`,
+required claims and an optional `MaxAge`; `Validate` adds your own checks.
+The user gets `sub` as ID, a name from `name`/`preferred_username`/`email`,
+roles from `roles`, `groups`, `realm_access.roles`, `cognito:groups` and
+Keycloak client roles, `scope` claims from `scope`/`scp`, and every other
+claim flattened (`tenant.plan`). Tokens are read from `Authorization:
+Bearer` by default; `FromCookie` and `FromQuery` are available.
 
 Requests without credentials run as anonymous until a requirement is hit:
 then they get a `401` problem with `WWW-Authenticate`; authenticated users
@@ -422,6 +462,7 @@ curl localhost:8080/me                 # 401 problem with WWW-Authenticate: Bear
 
 - [x] OpenAPI 3.1 generated from `In`/`Out` types and `validate` rules
 - [x] OpenTelemetry traces and metrics, health probes
+- [x] JWT verification with JWKS, OIDC discovery and service-mesh options
 - [ ] Form and multipart request bodies
 - [ ] Server-sent events over `iter.Seq`
 - [x] Custom radix router with `ServeMux` pattern syntax
